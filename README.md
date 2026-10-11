@@ -1,9 +1,9 @@
-# Hops, Length and Attention
+# Context, Position and Attention in Retrieval-Augmented LLMs
 
 A pre-registered empirical study of how retrieval-augmented LLMs use evidence:
-- when single-shot retrieval breaks on multi-hop questions, and whether iterative retrieval fixes it;
 - when long-context prompting beats RAG, and when it loses;
 - whether evidence position and the model's attention explain the difference;
+- when single-shot retrieval breaks, and whether iterative retrieval fixes it;
 - whether "looking at the page" beats OCR for visual documents.
 
 > **Status: in progress.** The framework, the pre-registration and the analysis code are

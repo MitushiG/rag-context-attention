@@ -1,4 +1,4 @@
-# Pre-registration: Hops, Length and Attention
+# Pre-registration: Context, Position and Attention in Retrieval-Augmented LLMs
 
 This file is committed **before any experiment is run**. Its git commit timestamp is the
 pre-registration record. Any later change to a hypothesis, metric, sample or test goes in
@@ -137,4 +137,4 @@ accuracy at lower cost.
 
 ## Amendments
 
-_None yet._
+- **2026-10-11:** Study renamed from "Hops, Length and Attention". Title only; no hypothesis, sample, metric or test changed. No experiments had been run.
