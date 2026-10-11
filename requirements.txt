@@ -1,0 +1,29 @@
+# Core (CPU): data, metrics, statistics, analysis
+numpy
+scipy
+pandas
+scikit-learn
+statsmodels>=0.13
+tabulate
+matplotlib
+tqdm
+pytest
+
+# Retrieval
+bm25s
+sentence-transformers
+datasets
+
+# Generation and attention (GPU; on Colab install vllm first, it pins torch)
+vllm
+transformers>=4.48,<5
+accelerate
+
+# Multimodal (H6)
+colpali-engine>=0.3.9
+pytesseract
+Pillow
+
+# Serving
+fastapi
+uvicorn
