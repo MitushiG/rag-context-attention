@@ -13,8 +13,7 @@ A pre-registered empirical study of how retrieval-augmented LLMs use evidence:
 ## Hypotheses
 
 The full pre-registration, with designs, metrics and statistical tests, is in
-[`HYPOTHESES.md`](HYPOTHESES.md). It was committed before any experiment was run.
-
+[`HYPOTHESES.md`](HYPOTHESES.md).
 | | Hypothesis | Main test |
 |---|---|---|
 | H1 | Single-shot retrieval finds hop-1 evidence far more often than later-hop evidence | clustered logistic regression on hop index |
