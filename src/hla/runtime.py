@@ -1,4 +1,8 @@
-"""Shared helpers for the experiment scripts."""
+"""Shared helpers for the experiment scripts.
+
+Results for the pilot and the main study go to separate folders, results/pilot/ and
+results/main/, so the pilot can never leak into the confirmatory analysis.
+"""
 from __future__ import annotations
 
 from pathlib import Path
@@ -9,49 +13,32 @@ from .metrics import exact_match, f1_score
 PROCESSED = Path("data/processed")
 SAMPLES = Path("data/samples")
 RESULTS = Path("results")
+SPLITS = ("pilot", "main")
 
 
-def load_examples(ids_file: str | None = None) -> list[dict]:
-    exs = read_jsonl(PROCESSED / "examples.jsonl")
-    if ids_file:
-        keep = set((SAMPLES / ids_file).read_text().split())
-        exs = [e for e in exs if e["qid"] in keep]
-    return exs
+def load_examples(split: str) -> list[dict]:
+    """Examples of ``split`` in the order of data/samples/{split}_ids.txt."""
+    ids = (SAMPLES / f"{split}_ids.txt").read_text().split()
+    by_id = {e["qid"]: e for e in read_jsonl(PROCESSED / "examples.jsonl")}
+    return [by_id[q] for q in ids]
 
 
 def load_corpus() -> list[dict]:
     return read_jsonl(PROCESSED / "corpus.jsonl")
 
 
-def build_retriever(name: str, corpus: list[dict]):
-    from .retrieval import BM25Retriever, DenseRetriever, HybridRetriever
-
-    if name == "bm25":
-        return BM25Retriever(corpus)
-    if name == "dense":
-        return DenseRetriever(corpus)
-    if name == "hybrid":
-        return HybridRetriever([BM25Retriever(corpus), DenseRetriever(corpus)])
-    raise ValueError(name)
-
-
 def score(records: list[dict], examples: list[dict]) -> list[dict]:
-    """Attach EM/F1 and question metadata to pipeline outputs."""
+    """Attach EM/F1 to pipeline outputs."""
     by_id = {e["qid"]: e for e in examples}
-    out = []
-    for r in records:
-        ex = by_id[r["qid"]]
-        out.append({
-            **r,
-            "dataset": ex["dataset"], "hops": ex["hops"], "qtype": ex["qtype"],
-            "em": exact_match(r["pred"], ex["answers"]),
-            "f1": f1_score(r["pred"], ex["answers"]),
-        })
-    return out
+    return [
+        {**r, "em": exact_match(r["pred"], by_id[r["qid"]]["answers"]),
+         "f1": f1_score(r["pred"], by_id[r["qid"]]["answers"])}
+        for r in records
+    ]
 
 
-def save(rows: list[dict], *parts: str) -> Path:
-    path = RESULTS.joinpath(*parts)
+def save(rows: list[dict], split: str, name: str) -> Path:
+    path = RESULTS / split / name
     write_jsonl(rows, path)
     print(f"wrote {len(rows)} rows -> {path}")
     return path

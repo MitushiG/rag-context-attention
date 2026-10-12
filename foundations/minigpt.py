@@ -1,4 +1,4 @@
-"""A small GPT, written from scratch. Learning exercise for the attention analysis in H5.
+"""A small GPT, written from scratch. Learning exercise for the attention analysis in Exp 2.
 
 Follow Karpathy's "Let's build GPT: from scratch, in code, spelled out"
 (https://www.youtube.com/watch?v=kCc8FmEb1nY) and fill in each TODO yourself. The
@@ -8,12 +8,12 @@ Run on a Colab T4:  python foundations/minigpt.py
 Done when: validation loss on TinyShakespeare goes below ~1.6 and samples look like
 (bad) Shakespeare.
 
-Questions to be able to answer afterwards (they come up in H5 and in interviews):
+Questions to be able to answer afterwards (they come up in Exp 2 and in interviews):
   1. Why is attention scaled by 1/sqrt(head_dim)?
   2. What does the causal mask do, and where exactly is it applied?
   3. Why multiple heads instead of one big head?
   4. What do residual connections and LayerNorm each fix?
-  5. In H5 we read attention rows of the *answer* tokens. Why those rows and not the
+  5. In Exp 2 we read attention rows of the *answer* tokens. Why those rows and not the
      columns?
 """
 import urllib.request

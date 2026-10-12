@@ -1,7 +1,7 @@
-"""Generator wrapper (vLLM) with greedy decoding and answer log-probabilities.
+"""Generator wrapper (vLLM) with greedy decoding.
 
-The mean token log-probability of the generated answer is the confidence signal used in
-H7. exp(mean logprob) is the geometric-mean token probability, a number in (0, 1].
+The mean token log-probability of each answer is recorded for descriptive use only; no
+pre-registered test depends on it.
 """
 from __future__ import annotations
 

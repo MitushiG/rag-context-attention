@@ -1,103 +1,88 @@
-"""Context builders for H3 (length) and H4 (position / gap).
+"""Context builders for Exp 1 (ranked expansion) and Exp 3 (evidence-pair placement).
 
-All builders are deterministic given ``seed`` so every condition sees identical inputs.
+All builders are deterministic, so Exp 2 can rebuild exactly the contexts the model saw.
 """
 from __future__ import annotations
 
 import random
 from typing import Callable
 
+from .corpus import labelled
+from .pipelines import format_passage
+
 
 def golds(ex: dict) -> list[dict]:
     g = [p for p in ex["passages"] if p["is_gold"]]
-    return sorted(g, key=lambda p: (p["hop"] is None, p["hop"] or 0))
+    return sorted(g, key=lambda p: p["hop"])
 
 
 def own_distractors(ex: dict) -> list[dict]:
     return [p for p in ex["passages"] if not p["is_gold"]]
 
 
-def _as_distractor(p: dict) -> dict:
-    """Corpus passages carry no gold labels; padding taken from other questions is a
-    distractor for this one."""
-    return {**p, "is_gold": False, "hop": None}
+# --------------------------------------------------------------------------- Exp 1
 
+def ranked_context(ex: dict, ranked_ids: list[str], docs: dict, budget_tokens: int | None,
+                   count_tokens: Callable[[str], int], k: int | None = None) -> list[dict]:
+    """The retriever's ranked list, cut either at ``k`` passages (RAG) or at the longest
+    prefix that fits in ``budget_tokens`` (expanded context).
 
-def _fillers(pool: list[dict], exclude: set[str], rng: random.Random, n: int) -> list[dict]:
-    cands = [p for p in pool if p["doc_id"] not in exclude]
-    return [_as_distractor(p) for p in rng.sample(cands, min(n, len(cands)))]
-
-
-def position_context(ex: dict, gold_position: int, n_total: int = 20, pool: list[dict] | None = None,
-                     seed: int = 13) -> list[dict]:
-    """H4(a): one gold passage at 1-indexed ``gold_position`` among ``n_total`` passages.
-
-    Distractors are the question's own (hard) distractors, topped up from ``pool``.
-    The distractor order is fixed per question so only the gold passage moves.
+    Because every context is a *prefix* of the same ranking, a longer budget only ever
+    adds lower-ranked passages: RAG ⊂ 4K ⊂ 12K ⊂ 28K for every question.
     """
-    rng = random.Random(f"{seed}-{ex['qid']}")
-    gold = golds(ex)[0]
-    dis = own_distractors(ex)
-    rng.shuffle(dis)
-    if len(dis) < n_total - 1:
-        if pool is None:
-            raise ValueError("not enough distractors; pass a pool")
-        dis += _fillers(pool, {p["doc_id"] for p in ex["passages"]}, rng, n_total - 1 - len(dis))
-    dis = dis[: n_total - 1]
-    return dis[: gold_position - 1] + [gold] + dis[gold_position - 1:]
-
-
-def gap_context(ex: dict, distance: int, n_total: int = 20, pool: list[dict] | None = None,
-                seed: int = 13) -> list[dict]:
-    """H4(b): two gold passages with ``distance`` passages between them (hop-1 first).
-
-    The start position is drawn at random (seeded) from the positions that fit.
-    """
-    rng = random.Random(f"{seed}-{ex['qid']}-gap")
-    g = golds(ex)
-    assert len(g) == 2, "gap_context needs exactly two gold passages"
-    dis = own_distractors(ex)
-    rng.shuffle(dis)
-    need = n_total - 2
-    if len(dis) < need:
-        if pool is None:
-            raise ValueError("not enough distractors; pass a pool")
-        dis += _fillers(pool, {p["doc_id"] for p in ex["passages"]}, rng, need - len(dis))
-    dis = dis[:need]
-    max_start = n_total - (distance + 2)  # 0-indexed
-    if max_start < 0:
-        raise ValueError(f"distance {distance} does not fit in {n_total} passages")
-    start = rng.randint(0, max_start)
-    ctx = list(dis)
-    ctx.insert(start, g[0])
-    ctx.insert(start + distance + 1, g[1])
+    if k is not None:
+        return [labelled(ex, docs[d]) for d in ranked_ids[:k]]
+    ctx, total = [], 0
+    for i, d in enumerate(ranked_ids, start=1):
+        p = labelled(ex, docs[d])
+        cost = count_tokens(format_passage(i, p)) + 2  # + the blank line between documents
+        if total + cost > budget_tokens:
+            break
+        ctx.append(p)
+        total += cost
+    else:
+        raise ValueError(f"ranking too short to fill {budget_tokens} tokens; retrieve more")
     return ctx
 
 
-def length_context(ex: dict, target_tokens: int, count_tokens: Callable[[str], int],
-                   pool: list[dict], seed: int = 13) -> list[dict]:
-    """H3: all gold passages, then the question's own (hard) distractors, then random
-    corpus passages, added while they fit, until the formatted context reaches
-    ``target_tokens``. Positions are shuffled (seeded).
+# --------------------------------------------------------------------------- Exp 3
 
-    Gold passages are always kept, so at very short targets the context may slightly
-    exceed the budget; the actual token count is recorded by the caller.
+N_PASSAGES = 20
+# Midpoint of the gold pair (1-indexed slots) and number of distractors between the two
+# gold passages. Close and far pairs share a midpoint, so location and separation vary
+# independently:
+#   early:  close (5, 6)    far (1, 10)
+#   middle: close (10, 11)  far (6, 15)
+#   late:   close (15, 16)  far (11, 20)
+LOCATIONS = {"early": 5.5, "middle": 10.5, "late": 15.5}
+SEPARATIONS = {"close": 0, "far": 8}
+
+
+def pair_slots(location: str, separation: str) -> tuple[int, int]:
+    mid, between = LOCATIONS[location], SEPARATIONS[separation]
+    half = (between + 1) / 2
+    return int(mid - half), int(mid + half)
+
+
+def pair_context(ex: dict, location: str, separation: str, seed: int = 13) -> list[dict]:
+    """20 passages: the question's 18 own distractors in a fixed (seeded) order, with the
+    two gold passages inserted at ``pair_slots(location, separation)``.
+
+    Across the six conditions only the two gold slots change: same passages, same
+    distractor order, same total length. Which hop comes first is drawn once per
+    question (seeded) and kept across conditions; it is recorded as a covariate.
     """
-    rng = random.Random(f"{seed}-{ex['qid']}-len")
-    ctx = golds(ex)
-    used = {p["doc_id"] for p in ex["passages"]}
-    total = sum(count_tokens(p["title"] + " " + p["text"]) + 8 for p in ctx)
-    own = own_distractors(ex)
-    rng.shuffle(own)
-    fill = [_as_distractor(p) for p in pool if p["doc_id"] not in used]
-    rng.shuffle(fill)
-    for p in own + fill:
-        if total >= target_tokens:
-            break
-        cost = count_tokens(p["title"] + " " + p["text"]) + 8
-        if total + cost > target_tokens * 1.02:
-            continue
-        ctx.append(p)
-        total += cost
-    rng.shuffle(ctx)
+    rng = random.Random(f"{seed}-{ex['qid']}-pair")
+    g = golds(ex)
+    assert len(g) == 2, "pair_context needs exactly two gold passages"
+    dis = own_distractors(ex)
+    rng.shuffle(dis)
+    if len(dis) < N_PASSAGES - 2:
+        raise ValueError(f"{ex['qid']}: needs {N_PASSAGES - 2} distractors, has {len(dis)}")
+    dis = dis[: N_PASSAGES - 2]
+    first, second = g if rng.random() < 0.5 else g[::-1]
+    a, b = pair_slots(location, separation)
+    ctx = list(dis)
+    ctx.insert(a - 1, first)
+    ctx.insert(b - 1, second)
     return ctx

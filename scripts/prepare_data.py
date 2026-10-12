@@ -1,40 +1,35 @@
-"""Download, sample (seed 13) and pool the corpus.
+"""Load MuSiQue 2-hop dev, pool the corpus, and fix the question order (seed 13).
 
 Writes
-  data/samples/{nq,hotpotqa,musique,h3}_ids.txt   (committed: the pre-registered sample)
-  data/processed/examples.jsonl, corpus.jsonl     (git-ignored, regenerated from raw)
-"""
-import random
+  data/samples/pilot_ids.txt       50 pilot questions (never used in the main analysis)
+  data/samples/main_pool_ids.txt   every other question, in a fixed random order;
+                                   scripts/power.py takes the main sample as a prefix
+  data/processed/examples.jsonl, corpus.jsonl   (git-ignored, regenerated from raw)
 
+Commit the two id files before running anything on a GPU.
+"""
 from hla.corpus import build_corpus
-from hla.data import load_hotpotqa, load_musique, load_nq, sample, sample_musique, write_jsonl
+from hla.data import load_musique_2hop, split_pilot, write_jsonl
 from hla.runtime import PROCESSED, SAMPLES
 
 SEED = 13
+N_PILOT = 50
 
 
 def main():
-    nq = sample(load_nq(), 500, SEED)
-    hotpot = sample(load_hotpotqa(), 500, SEED)
-    musique = sample_musique(load_musique(), {2: 200, 3: 150, 4: 150}, SEED)
-    examples = nq + hotpot + musique
-
+    examples = load_musique_2hop()
+    # The corpus pools every 2-hop dev question's passages, not only the sampled ones,
+    # so the retriever and the expanded contexts see a realistic number of passages.
     corpus, examples = build_corpus(examples)
     write_jsonl(examples, PROCESSED / "examples.jsonl")
     write_jsonl(corpus, PROCESSED / "corpus.jsonl")
 
+    pilot, pool = split_pilot(examples, N_PILOT, SEED)
     SAMPLES.mkdir(parents=True, exist_ok=True)
-    for name, exs in [("nq", nq), ("hotpotqa", hotpot), ("musique", musique)]:
-        (SAMPLES / f"{name}_ids.txt").write_text("\n".join(e["qid"] for e in exs) + "\n")
-
-    # H3 subset: 100 per dataset
-    rng = random.Random(SEED)
-    h3 = [e["qid"] for exs in (nq, hotpot, musique) for e in rng.sample(exs, 100)]
-    (SAMPLES / "h3_ids.txt").write_text("\n".join(h3) + "\n")
-
-    print(f"examples: {len(examples)}  corpus passages: {len(corpus)}")
-    for name, exs in [("nq", nq), ("hotpotqa", hotpot), ("musique", musique)]:
-        print(f"  {name}: {len(exs)}")
+    (SAMPLES / "pilot_ids.txt").write_text("\n".join(e["qid"] for e in pilot) + "\n")
+    (SAMPLES / "main_pool_ids.txt").write_text("\n".join(e["qid"] for e in pool) + "\n")
+    print(f"2-hop questions: {len(examples)}  pilot: {len(pilot)}  main pool: {len(pool)}  "
+          f"corpus passages: {len(corpus)}")
 
 
 if __name__ == "__main__":

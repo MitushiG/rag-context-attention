@@ -1,16 +1,12 @@
-"""CPU-only tests for metrics, statistics, context builders and the router."""
-import math
-import random
-
+"""CPU-only tests for metrics, statistics, context builders and the attention probe."""
 import numpy as np
 import pandas as pd
 import pytest
 
 from hla import stats
-from hla.contexts import gap_context, length_context, position_context
+from hla.contexts import LOCATIONS, SEPARATIONS, pair_context, pair_slots, ranked_context
 from hla.corpus import build_corpus
-from hla.metrics import exact_match, f1_score, ndcg_at_k, recall_at_k, reciprocal_rank
-from hla.router import choose_threshold, route
+from hla.metrics import exact_match, f1_score
 
 
 # --------------------------------------------------------------------------- metrics
@@ -20,14 +16,6 @@ def test_em_f1_normalization():
     assert exact_match("Paris", ["London", "paris"]) == 1.0
     assert f1_score("Barack Obama", ["Obama"]) == pytest.approx(2 / 3)
     assert f1_score("", ["x"]) == 0.0
-
-
-def test_retrieval_metrics():
-    ranked = ["a", "b", "c", "d"]
-    assert recall_at_k(ranked, ["c", "z"], 3) == 0.5
-    assert reciprocal_rank(ranked, ["c"]) == pytest.approx(1 / 3)
-    assert ndcg_at_k(ranked, {"a": 1.0}, 5) == 1.0
-    assert ndcg_at_k(ranked, {"b": 1.0}, 5) == pytest.approx(1 / math.log2(3))
 
 
 # --------------------------------------------------------------------------- stats
@@ -58,6 +46,26 @@ def test_auroc_matches_sklearn():
     assert stats.auroc(s, y) == pytest.approx(roc_auc_score(y, s))
 
 
+def test_stratified_auroc_removes_confounding():
+    # Score and accuracy both depend on the stratum only: pooled AUROC is high, but
+    # within each stratum the score carries no information.
+    rng = np.random.default_rng(1)
+    g = np.repeat([0, 1], 2000)
+    y = (rng.uniform(size=4000) < np.where(g == 0, 0.8, 0.2)).astype(int)
+    s = np.where(g == 0, 1.0, 0.0) + rng.normal(0, 0.1, 4000)
+    assert stats.auroc(s, y) > 0.75
+    assert stats.stratified_auroc(s, y, g) == pytest.approx(0.5, abs=0.05)
+    assert stats.stratified_auroc(s, y, np.zeros(4000)) == pytest.approx(stats.auroc(s, y))
+
+
+def test_cluster_bootstrap_ci_covers_truth():
+    rng = np.random.default_rng(2)
+    df = pd.DataFrame({"qid": np.repeat(np.arange(300), 3), "x": rng.normal(0.2, 1, 900)})
+    est = stats.cluster_bootstrap(df, "qid", lambda d: d.x.mean(), n_boot=500)
+    assert est.ci_low < 0.2 < est.ci_high
+    assert stats.one_sided_from_two(est, 0.0, ">") < 0.01
+
+
 def test_paired_bootstrap_ci_covers_truth():
     rng = np.random.default_rng(1)
     a = rng.binomial(1, 0.6, 500)
@@ -67,105 +75,96 @@ def test_paired_bootstrap_ci_covers_truth():
     assert est.ci_low < 0.1 < est.ci_high
 
 
-def test_ece_perfectly_calibrated_is_small():
-    rng = np.random.default_rng(2)
-    c = rng.uniform(0, 1, 20000)
-    y = rng.uniform(0, 1, 20000) < c
-    assert stats.expected_calibration_error(c, y) < 0.02
-
-
 def test_clustered_logit_recovers_sign():
     rng = np.random.default_rng(3)
     rows = []
     for q in range(300):
         u = rng.normal(0, 0.5)
-        for hop in (1, 2, 3):
-            p = 1 / (1 + np.exp(-(2.0 - 1.0 * hop + u)))
-            rows.append({"qid": q, "hop_index": hop, "hit": int(rng.uniform() < p)})
-    r = stats.logit_clustered("hit ~ hop_index", pd.DataFrame(rows), "qid")
-    assert r.params["hop_index"] < 0
-    assert stats.one_sided_p(r, "hop_index", "<") < 0.001
+        for x in (1, 2, 3):
+            p = 1 / (1 + np.exp(-(2.0 - 1.0 * x + u)))
+            rows.append({"qid": q, "x": x, "y": int(rng.uniform() < p)})
+    r = stats.logit_clustered("y ~ x", pd.DataFrame(rows), "qid")
+    assert r.params["x"] < 0
+    assert stats.one_sided_p(r, "x", "<") < 0.001
 
 
 # --------------------------------------------------------------------------- contexts
 
-def _example(qid, n_gold, n_dis, hops=None):
-    ps = [{"title": f"{qid}-g{i}", "text": "gold " * 20, "is_gold": True, "hop": (hops or [i + 1] * n_gold)[i]}
-          for i in range(n_gold)]
+def _example(qid, n_dis=18):
+    ps = [{"title": f"{qid}-g{h}", "text": "gold " * 20, "is_gold": True, "hop": h} for h in (1, 2)]
     ps += [{"title": f"{qid}-d{i}", "text": "dis " * 20, "is_gold": False, "hop": None} for i in range(n_dis)]
-    return {"qid": qid, "dataset": "x", "question": "q?", "answers": ["a"], "hops": n_gold, "qtype": None,
-            "passages": ps}
+    return {"qid": qid, "question": "q?", "answers": ["a"], "passages": ps}
 
 
 @pytest.fixture
 def built():
-    exs = [_example("q1", 1, 19), _example("q2", 2, 8), _example("q3", 2, 30)]
-    corpus, exs = build_corpus(exs)
+    corpus, exs = build_corpus([_example(f"q{i}") for i in range(30)])
     return corpus, {e["qid"]: e for e in exs}
 
 
 def test_corpus_ids_and_gold_order(built):
     corpus, exs = built
-    assert len(corpus) == 20 + 10 + 32
-    assert exs["q2"]["gold_hops"][exs["q2"]["gold_ids"][0]] == 1
+    assert len(corpus) == 30 * 20
+    ex = exs["q1"]
+    assert [ex["gold_hops"][d] for d in ex["gold_ids"]] == [1, 2]
 
 
-@pytest.mark.parametrize("pos", [1, 5, 10, 20])
-def test_position_context(built, pos):
-    _, exs = built
-    ctx = position_context(exs["q1"], pos)
-    assert len(ctx) == 20
-    assert ctx[pos - 1]["is_gold"] and sum(p["is_gold"] for p in ctx) == 1
-    # distractor order does not depend on the gold position
-    others = [p["doc_id"] for p in ctx if not p["is_gold"]]
-    assert others == [p["doc_id"] for p in position_context(exs["q1"], 1) if not p["is_gold"]]
-
-
-@pytest.mark.parametrize("d", [0, 5, 18])
-def test_gap_context(built, d):
+def test_ranked_context_prefixes_are_nested(built):
     corpus, exs = built
-    ctx = gap_context(exs["q2"], d, pool=corpus)
-    idx = [i for i, p in enumerate(ctx) if p["is_gold"]]
-    assert len(ctx) == 20 and idx[1] - idx[0] - 1 == d
-    assert ctx[idx[0]]["hop"] == 1
-
-
-def test_length_context_keeps_gold_and_hits_budget(built):
-    corpus, exs = built
+    docs = {d["doc_id"]: d for d in corpus}
+    ex = exs["q3"]
+    ranked = [d["doc_id"] for d in corpus]
     count = lambda s: len(s.split())
-    for target in (60, 400, 1000):
-        ctx = length_context(exs["q3"], target, count, corpus)
-        assert sum(p["is_gold"] for p in ctx) == 2
-        total = sum(count(p["title"] + " " + p["text"]) + 8 for p in ctx)
-        assert total <= max(target * 1.02, 2 * 29)
+    rag = ranked_context(ex, ranked, docs, None, count, k=5)
+    ctxs = [ranked_context(ex, ranked, docs, b, count) for b in (300, 900, 2700)]
+    assert [p["doc_id"] for p in rag] == ranked[:5]
+    for short, long in zip([rag] + ctxs, ctxs):
+        assert [p["doc_id"] for p in long[: len(short)]] == [p["doc_id"] for p in short]
+    for b, c in zip((300, 900, 2700), ctxs):
+        assert sum(count(f"Document [{i}] (Title: {p['title']}) {p['text']}") + 2
+                   for i, p in enumerate(c, start=1)) <= b
+    # gold labels are relative to the question
+    assert sum(p["is_gold"] for p in ctxs[-1]) == sum(d in ex["gold_hops"] for d in ranked[: len(ctxs[-1])])
+    with pytest.raises(ValueError):
+        ranked_context(ex, ranked[:10], docs, 10**6, count)
 
 
-# --------------------------------------------------------------------------- multimodal
+def test_pair_slots_share_midpoints():
+    for loc, mid in LOCATIONS.items():
+        for sep, between in SEPARATIONS.items():
+            a, b = pair_slots(loc, sep)
+            assert (a + b) / 2 == mid and b - a - 1 == between and 1 <= a < b <= 20
 
-def test_maxsim_from_scratch():
+
+def test_pair_context_only_moves_the_golds(built):
+    _, exs = built
+    ex = exs["q7"]
+    seen = []
+    for loc in LOCATIONS:
+        for sep in SEPARATIONS:
+            ctx = pair_context(ex, loc, sep)
+            a, b = pair_slots(loc, sep)
+            assert len(ctx) == 20 and [i + 1 for i, p in enumerate(ctx) if p["is_gold"]] == [a, b]
+            seen.append(([p["doc_id"] for p in ctx if not p["is_gold"]],
+                         [p["hop"] for p in ctx if p["is_gold"]]))
+    assert all(s == seen[0] for s in seen)  # same distractor order and hop order everywhere
+
+
+# --------------------------------------------------------------------------- attention probe
+
+def test_attention_probe_matches_eager():
     torch = pytest.importorskip("torch")
-    from hla.multimodal import maxsim
+    transformers = pytest.importorskip("transformers")
+    from hla.attention import AttentionProbe
 
-    rng = torch.Generator().manual_seed(0)
-    qs = [torch.randn(n, 8, generator=rng) for n in (3, 5)]
-    ds = [torch.randn(n, 8, generator=rng) for n in (4, 7, 2)]
-    got = maxsim(qs, ds, device="cpu", q_chunk=1)
-    for i, q in enumerate(qs):
-        for j, d in enumerate(ds):
-            assert got[i, j].item() == pytest.approx((q @ d.T).max(dim=1).values.sum().item(), abs=1e-5)
-
-
-# --------------------------------------------------------------------------- router
-
-def test_router_extremes_and_choice():
-    rng = random.Random(0)
-    n = 400
-    conf = np.array([rng.random() for _ in range(n)])
-    single = (conf > 0.5).astype(int)  # confident answers are right
-    multi = np.ones(n, int)
-    calls = np.full(n, 3)
-    assert route(conf, single, multi, calls, -np.inf)["mean_calls"] == 1
-    assert route(conf, single, multi, calls, np.inf)["em"] == 1
-    t = choose_threshold(conf, single, multi, calls, max_em_drop=0.0)
-    r = route(conf, single, multi, calls, t)
-    assert r["em"] == 1 and r["mean_calls"] < 1 + 3
+    torch.manual_seed(0)
+    cfg = transformers.Qwen2Config(vocab_size=100, hidden_size=64, intermediate_size=128, num_hidden_layers=3,
+                                   num_attention_heads=4, num_key_value_heads=2, max_position_embeddings=256)
+    model = transformers.Qwen2ForCausalLM._from_config(cfg, attn_implementation="sdpa")
+    probe = AttentionProbe(model, None, device="cpu")
+    ids = torch.randint(0, 100, (60,)).tolist()
+    assert probe.check_against_eager(ids, (50, 57), atol=1e-4) < 1e-4
+    att = probe.answer_attention(ids, (50, 57))
+    assert att.shape == (3, 60)
+    assert np.allclose(att.sum(axis=1), 1, atol=1e-5)
+    assert np.all(att[:, 57:] == 0)  # causal: answer rows never see later positions

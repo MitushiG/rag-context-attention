@@ -1,110 +1,106 @@
-# Context, Position and Attention in Retrieval-Augmented LLMs
+# Retrieval vs. Long Context: How LLMs Use Evidence
 
-A pre-registered empirical study of how retrieval-augmented LLMs use evidence:
-- when long-context prompting beats RAG, and when it loses;
-- whether evidence position and the model's attention explain the difference;
-- when single-shot retrieval breaks, and whether iterative retrieval fixes it;
-- whether "looking at the page" beats OCR for visual documents.
+A pre-registered experimental study of how an LLM uses retrieved evidence on multi-step
+questions, built from three experiments that share one dataset, model, retriever and
+evaluation pipeline:
+
+1. **Retrieval vs. long context.** As more lower-ranked text is added, does accuracy
+   fall, and does top-k RAG beat a long context?
+2. **Attention to evidence.** Is the model more likely to be right when its attention is
+   concentrated on the gold passages?
+3. **Evidence geometry.** Does separating the two required passages hurt, even when both
+   are present and the length is fixed?
 
 > **Status: in progress.** The framework, the pre-registration and the analysis code are
 > written and unit-tested on CPU. **No experiments have been run yet**, so there are no
-> results in this repository. `results/summary.md` will appear once they are.
+> results in this repository. `results/main/summary.md` will appear once they are.
 
-## Hypotheses
+## Design
 
-The full pre-registration, with designs, metrics and statistical tests, is in
+The full pre-registration, with designs, metrics and tests, is in
 [`HYPOTHESES.md`](HYPOTHESES.md).
-| | Hypothesis | Main test |
+
+| | Conditions | Primary test |
 |---|---|---|
-| H1 | Single-shot retrieval finds hop-1 evidence far more often than later-hop evidence | clustered logistic regression on hop index |
-| H2 | IRCoT beats single-shot RAG on multi-hop questions, with gains growing with hop count, and not on NQ | McNemar's test; method × hops interaction |
-| H3 | Long-context accuracy decays with distractor length, and RAG overtakes it at a crossover length | logistic regression: log(length) × condition |
-| H4 | Accuracy is U-shaped in gold-passage position; multi-hop accuracy falls as gold passages move apart | quadratic / slope terms |
-| H5 | Attention share on the gold passage predicts correctness and mirrors the position curve | AUROC; quadratic regression |
-| H6 | Page-image retrieval (ColQwen2.5) beats OCR text on charts and tables, but not on text pages | Wilcoxon test per group + interaction CI |
-| H7 | Answer log-probability is a usable escalation signal; a router cuts LLM calls vs always-IRCoT | AUROC difference; held-out router evaluation |
+| **Exp 1** | RAG top-5 vs. the top-ranked passages that fit in 4K / 12K / 28K tokens (nested prefixes of one ranking) | among questions whose gold passages are in the top 5: EM falls with log2(context tokens), clustered logistic regression |
+| **Exp 2** | attention share on the gold passages, read from the answer tokens of Exp 1 and Exp 3 runs | condition-stratified AUROC for correctness > 0.5 |
+| **Exp 3** | 2 gold passages placed early / middle / late × close / far, among 20 passages of fixed length | far vs close, adjusting for location, clustered logistic regression |
 
-H1, H2, H3 and H7 are primary and are Holm–Bonferroni corrected together. H4–H6 are
-secondary.
-
-## Setup
+The three primary tests are Holm–Bonferroni corrected together. The sample size comes
+from a 50-question pilot and a simulation-based power analysis (`scripts/power.py`).
 
 | | |
 |---|---|
-| Data | 500 NQ-Open (single-hop control), 500 HotpotQA (2-hop), 500 MuSiQue (200/150/150 at 2/3/4 hops), ViDoRe v1 subsets |
-| Corpus | closed pool of every sampled question's gold + distractor passages |
-| Retrieval | BM25 (`bm25s`), dense (`e5-base-v2`), hybrid (reciprocal rank fusion), optional cross-encoder rerank |
+| Data | MuSiQue-Ans v1.0 dev, 2-hop questions (2 gold + 18 distractor passages each) |
+| Corpus | closed pool of every 2-hop dev question's passages |
+| Retriever | dense, `e5-base-v2` |
 | Generator | `Qwen2.5-7B-Instruct` via vLLM, greedy decoding |
-| Multi-hop | IRCoT (each reasoning sentence becomes the next retrieval query) |
-| Attention | eager-attention forward hooks, answer-token attention mass per passage per layer |
-| Multimodal | `colqwen2.5-v0.2` with a from-scratch MaxSim, checked against `colpali-engine` |
-| Serving | FastAPI endpoint that answers single-shot and escalates to IRCoT when confidence is low |
+| Attention | SDPA forward pass with per-layer pre-hooks that recompute only the answer rows of attention, so 28K-token contexts fit in memory; verified against eager attention |
 
 ## Layout
 
 ```
-HYPOTHESES.md            pre-registration (amend only in its Amendments section)
+HYPOTHESES.md             pre-registration (amend only in its Amendments section)
 src/hla/
-  data.py                NQ / HotpotQA / MuSiQue loaders -> one schema, with hop order
-  corpus.py              pooled closed corpus
-  retrieval.py           BM25, dense, hybrid (RRF), cross-encoder reranker
-  generation.py          vLLM wrapper: greedy answers + mean token log-prob
-  pipelines.py           closed-book, fixed-context QA, single-shot RAG, IRCoT
-  contexts.py            context builders for length (H3), position and gap (H4)
-  attention.py           per-passage attention probe (H5)
-  multimodal.py          ViDoRe loading, OCR, ColQwen2.5, MaxSim from scratch (H6)
-  router.py              confidence router + threshold selection (H7)
-  stats.py               bootstrap, McNemar, Holm, AUROC, ECE, clustered logit
-scripts/                 prepare_data, run_h1 ... run_h7, analyze
-app/server.py            FastAPI router service
-foundations/minigpt.py   a small GPT from scratch (exercise skeleton)
-tests/                   CPU unit tests
+  data.py                 MuSiQue 2-hop loader, pilot / main-pool split
+  corpus.py               pooled closed corpus
+  retrieval.py            dense retriever
+  generation.py           vLLM wrapper (greedy)
+  pipelines.py            the single QA prompt, batched answering
+  contexts.py             ranked-prefix contexts (Exp 1), gold-pair layouts (Exp 3)
+  attention.py            memory-efficient answer-row attention probe (Exp 2)
+  stats.py                McNemar, Holm, AUROC, stratified AUROC, bootstraps, clustered logit
+scripts/
+  prepare_data.py         sample + corpus
+  run_exp1_context.py     Exp 1
+  run_exp3_position.py    Exp 3
+  run_exp2_attention.py   Exp 2 (after Exp 1 and Exp 3)
+  power.py                pilot -> sample size
+  analyze.py              all tests -> results/<split>/summary.md
+foundations/minigpt.py    a small GPT from scratch (learning exercise)
+tests/                    CPU unit tests
 ```
 
 ## Running
 
-Everything except `analyze.py` and the tests needs a GPU. Colab with an L4 or A100 is enough.
+Everything except `power.py`, `analyze.py` and the tests needs a GPU. Colab with an L4
+should do; an A100 is safer for the 28K-token runs.
 
 ```bash
 pip install vllm                        # first: it pins torch
 pip install -r requirements.txt && pip install -e .
-apt-get install -y tesseract-ocr        # for H6 OCR
 
 # MuSiQue needs a manual download: run download_data.sh from
 # https://github.com/StonyBrookNLP/musique and copy musique_ans_v1.0_dev.jsonl to data/raw/
-python scripts/prepare_data.py
+python scripts/prepare_data.py          # commit data/samples/*.txt
 
-python scripts/run_h1_retrieval.py
-python scripts/run_h2_iteration.py              # closed-book, oracle, single-shot, IRCoT
-python scripts/run_h3_h4_context.py --part h3   # A100 recommended (32K contexts)
-python scripts/run_h3_h4_context.py --part h4a
-python scripts/run_h3_h4_context.py --part h4b
-python scripts/run_h5_attention.py              # after h4a
-python scripts/run_h6_multimodal.py
-python scripts/run_h7_router.py                 # CPU, uses H2 outputs
-python scripts/analyze.py                       # CPU -> results/summary.md
+# 1. pilot (50 questions)
+python scripts/run_exp1_context.py --split pilot
+python scripts/run_exp3_position.py --split pilot
+python scripts/run_exp2_attention.py --split pilot --check
+python scripts/analyze.py --split pilot
+python scripts/power.py                 # writes data/samples/main_ids.txt; commit it
 
-uvicorn app.server:app --port 8000              # after H7
-pytest                                          # CPU tests
+# 2. main study
+python scripts/run_exp1_context.py --split main
+python scripts/run_exp3_position.py --split main
+python scripts/run_exp2_attention.py --split main
+python scripts/analyze.py --split main
+
+pytest                                  # CPU tests
 ```
 
-Debug any GPU script on a few questions first, e.g. `run_h2_iteration.py --limit 20`.
+Use `--limit 5` on any GPU script for a quick debug run.
 
 ## Known limitations
 
-- **Closed corpus.** Retrieval runs over the benchmarks' own candidate pools, not full
-  Wikipedia, so absolute recall is optimistic. The comparisons between methods are what
-  the study relies on.
-- **One generator** (Qwen2.5-7B). Effects may differ for other model families and sizes.
-- **IRCoT is a simplified re-implementation** (zero-shot prompt, no few-shot demonstrations).
-- **Router cost.** The router pays for the single-shot call *plus* IRCoT when it
-  escalates, so it only saves calls if it escalates on fewer than about
-  (IRCoT calls − 1) / IRCoT calls of the questions.
-- **Attention is not explanation** (Jain & Wallace, 2019). H5 is correlational.
+- **Closed corpus.** Retrieval runs over the benchmark's own passages, not full
+  Wikipedia, so absolute recall is optimistic.
+- **One model, one dataset, one retriever.** Effects may differ elsewhere.
+- **Attention is not explanation** (Jain & Wallace, 2019). Exp 2 is correlational.
 
 ## References
 
-Lewis et al. 2020 (RAG) · Karpukhin et al. 2020 (DPR) · Khattab & Zaharia 2020 (ColBERT) ·
-Yang et al. 2018 (HotpotQA) · Trivedi et al. 2022 (MuSiQue) · Trivedi et al. 2023 (IRCoT) ·
-Jiang et al. 2023 (FLARE) · Jeong et al. 2024 (Adaptive-RAG) · Liu et al. 2023 (Lost in the
-Middle) · Faysse et al. 2024 (ColPali) · Jain & Wallace 2019 (Attention is not Explanation)
+Lewis et al. 2020 (RAG) · Karpukhin et al. 2020 (DPR) · Trivedi et al. 2022 (MuSiQue) ·
+Liu et al. 2023 (Lost in the Middle) · Jain & Wallace 2019 (Attention is not Explanation) ·
+Vaswani et al. 2017 (Attention Is All You Need)

@@ -1,127 +1,28 @@
-"""Load NQ, HotpotQA and MuSiQue into one schema.
+"""Load MuSiQue-Ans 2-hop questions into one schema.
 
 Every example is a dict:
 
     {
-      "qid": str, "dataset": "nq" | "hotpotqa" | "musique",
-      "question": str, "answers": [str, ...],
-      "hops": int,                 # 1 for NQ, 2 for HotpotQA, 2-4 for MuSiQue
-      "qtype": str | None,         # HotpotQA 'bridge'/'comparison'; MuSiQue id prefix
+      "qid": str, "question": str, "answers": [str, ...],
       "passages": [{"title", "text", "is_gold": bool, "hop": int | None}, ...],
     }
 
-``passages`` is the question's own candidate set (gold + distractors). ``hop`` gives the
-order in which a gold passage is needed (1 = first hop); it is None for distractors and
-for gold passages whose order is not defined (HotpotQA comparison questions).
+MuSiQue was built so that its multi-hop questions cannot be answered from one passage
+(Trivedi et al., 2022), which is what the position and attention experiments need. Each
+2-hop question comes with exactly 2 gold passages and 18 hard distractors. ``hop`` gives
+the order in which a gold passage is needed (1 = first hop); None for distractors.
 """
 from __future__ import annotations
 
-import gzip
 import json
 import random
-import re
-import urllib.request
 from pathlib import Path
 
 RAW = Path("data/raw")
-
-HOTPOT_URL = "http://curtis.ml.cmu.edu/datasets/hotpot/hotpot_dev_distractor_v1.json"
-# 20-document NQ-Open release from "Lost in the Middle" (Liu et al., 2023).
-NQ_LITM_URL = (
-    "https://raw.githubusercontent.com/nelson-liu/lost-in-the-middle/main/"
-    "qa_data/20_total_documents/nq-open-20_total_documents_gold_at_0.jsonl.gz"
-)
 MUSIQUE_FILE = "musique_ans_v1.0_dev.jsonl"  # see README: manual download
 
 
-def _download(url: str, dest: Path) -> Path:
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    if not dest.exists():
-        print(f"downloading {url} -> {dest}")
-        urllib.request.urlretrieve(url, dest)
-    return dest
-
-
-def _tokens(s: str) -> set[str]:
-    return set(re.findall(r"\w+", s.lower()))
-
-
-# --------------------------------------------------------------------------- NQ
-
-def load_nq(raw_dir: Path = RAW) -> list[dict]:
-    path = _download(NQ_LITM_URL, raw_dir / "nq-open-20docs.jsonl.gz")
-    out = []
-    with gzip.open(path, "rt") as f:
-        for i, line in enumerate(f):
-            r = json.loads(line)
-            passages = [
-                {
-                    "title": c["title"],
-                    "text": c["text"],
-                    "is_gold": bool(c.get("isgold", False)),
-                    "hop": 1 if c.get("isgold", False) else None,
-                }
-                for c in r["ctxs"]
-            ]
-            if sum(p["is_gold"] for p in passages) != 1:
-                continue
-            out.append(
-                {
-                    "qid": f"nq-{i}",
-                    "dataset": "nq",
-                    "question": r["question"],
-                    "answers": list(r["answers"]),
-                    "hops": 1,
-                    "qtype": None,
-                    "passages": passages,
-                }
-            )
-    return out
-
-
-# --------------------------------------------------------------------------- HotpotQA
-
-def load_hotpotqa(raw_dir: Path = RAW) -> list[dict]:
-    path = _download(HOTPOT_URL, raw_dir / "hotpot_dev_distractor_v1.json")
-    data = json.loads(path.read_text())
-    out = []
-    for r in data:
-        gold_titles = {t for t, _ in r["supporting_facts"]}
-        passages = [
-            {"title": t, "text": " ".join(s.strip() for s in sents), "is_gold": t in gold_titles, "hop": None}
-            for t, sents in r["context"]
-        ]
-        golds = [p for p in passages if p["is_gold"]]
-        if len(golds) != 2:
-            continue
-        if r["type"] == "bridge":
-            # Hop 1 is the passage the question names directly. Use title overlap with the
-            # question; ties leave hop order undefined (excluded from per-hop analyses).
-            q = _tokens(r["question"])
-            o = [len(_tokens(g["title"]) & q) / max(1, len(_tokens(g["title"]))) for g in golds]
-            if o[0] != o[1]:
-                first = 0 if o[0] > o[1] else 1
-                golds[first]["hop"], golds[1 - first]["hop"] = 1, 2
-        else:  # comparison: both entities are named in the question
-            for g in golds:
-                g["hop"] = 1
-        out.append(
-            {
-                "qid": f"hotpotqa-{r['_id']}",
-                "dataset": "hotpotqa",
-                "question": r["question"],
-                "answers": [r["answer"]],
-                "hops": 2,
-                "qtype": r["type"],
-                "passages": passages,
-            }
-        )
-    return out
-
-
-# --------------------------------------------------------------------------- MuSiQue
-
-def load_musique(raw_dir: Path = RAW) -> list[dict]:
+def load_musique_2hop(raw_dir: Path = RAW) -> list[dict]:
     path = raw_dir / MUSIQUE_FILE
     if not path.exists():
         raise FileNotFoundError(
@@ -132,7 +33,7 @@ def load_musique(raw_dir: Path = RAW) -> list[dict]:
     out = []
     for line in path.read_text().splitlines():
         r = json.loads(line)
-        if not r.get("answerable", True):
+        if not r["id"].startswith("2hop") or not r.get("answerable", True):
             continue
         hop_of_para = {}
         for h, step in enumerate(r["question_decomposition"], start=1):
@@ -148,35 +49,28 @@ def load_musique(raw_dir: Path = RAW) -> list[dict]:
             }
             for p in r["paragraphs"]
         ]
+        golds = [p for p in passages if p["is_gold"]]
+        # Experiment 3 needs two gold passages with a defined hop order and 18 distractors.
+        if sorted(g["hop"] or 0 for g in golds) != [1, 2] or len(passages) - len(golds) < 18:
+            continue
         out.append(
             {
                 "qid": f"musique-{r['id']}",
-                "dataset": "musique",
                 "question": r["question"],
                 "answers": [r["answer"], *r.get("answer_aliases", [])],
-                "hops": len(r["question_decomposition"]),
-                "qtype": r["id"].split("__")[0],  # e.g. '2hop', '3hop1', '4hop3'
                 "passages": passages,
             }
         )
     return out
 
 
-# --------------------------------------------------------------------------- sampling
-
-def sample(examples: list[dict], n: int, seed: int = 13) -> list[dict]:
-    rng = random.Random(seed)
-    return rng.sample(examples, min(n, len(examples)))
-
-
-def sample_musique(examples: list[dict], per_hop: dict[int, int], seed: int = 13) -> list[dict]:
-    """Stratified sample by hop count, e.g. {2: 200, 3: 150, 4: 150}."""
-    rng = random.Random(seed)
-    out = []
-    for h, n in sorted(per_hop.items()):
-        pool = [e for e in examples if e["hops"] == h]
-        out.extend(rng.sample(pool, min(n, len(pool))))
-    return out
+def split_pilot(examples: list[dict], n_pilot: int, seed: int = 13) -> tuple[list[dict], list[dict]]:
+    """Shuffle once (seeded). The first ``n_pilot`` are the pilot; the rest, in order,
+    are the main pool. The main sample is a prefix of the pool whose length is set by
+    the power analysis, so the sample does not depend on what the pilot showed."""
+    order = list(examples)
+    random.Random(seed).shuffle(order)
+    return order[:n_pilot], order[n_pilot:]
 
 
 def write_jsonl(rows, path: Path) -> None:

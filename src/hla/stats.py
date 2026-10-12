@@ -131,18 +131,44 @@ def auroc_ci(scores, labels, n_boot: int = 10_000, seed: int = 13) -> Estimate:
     return est
 
 
-def expected_calibration_error(conf: Sequence[float], correct: Sequence[int], n_bins: int = 10) -> float:
-    """ECE with equal-width bins on [0, 1]. ``conf`` must be a probability."""
-    c = np.asarray(conf, float)
-    y = np.asarray(correct, float)
-    bins = np.linspace(0, 1, n_bins + 1)
-    idx = np.clip(np.digitize(c, bins[1:-1]), 0, n_bins - 1)
-    ece = 0.0
-    for b in range(n_bins):
-        m = idx == b
-        if m.any():
-            ece += m.mean() * abs(c[m].mean() - y[m].mean())
-    return float(ece)
+def stratified_auroc(scores, labels, strata) -> float:
+    """AUROC computed within each stratum and averaged, weighted by the number of
+    (positive, negative) pairs. Equivalent to only comparing correct vs incorrect answers
+    *within* the same condition, so a condition that lowers both attention share and
+    accuracy cannot by itself produce a high AUROC."""
+    s, y, g = np.asarray(scores, float), np.asarray(labels, int), np.asarray(strata)
+    num = den = 0.0
+    for k in np.unique(g):
+        m = g == k
+        n_pairs = y[m].sum() * (1 - y[m]).sum()
+        if n_pairs:
+            num += n_pairs * auroc(s[m], y[m])
+            den += n_pairs
+    return float(num / den) if den else float("nan")
+
+
+def cluster_bootstrap(df, cluster_col: str, stat: Callable, null: float = 0.0,
+                      n_boot: int = 2000, alpha: float = 0.05, seed: int = 13) -> Estimate:
+    """Percentile bootstrap that resamples whole clusters (questions), so a question that
+    contributes several rows (one per condition) stays intact. ``stat(df) -> float``.
+    The p-value is two-sided for H0: stat == ``null`` (shift method)."""
+    rng = np.random.default_rng(seed)
+    groups = [np.asarray(g) for g in df.groupby(cluster_col, sort=False).indices.values()]
+    point = stat(df)
+    boots = np.empty(n_boot)
+    for b in range(n_boot):
+        pick = rng.integers(0, len(groups), size=len(groups))
+        boots[b] = stat(df.iloc[np.concatenate([groups[i] for i in pick])])
+    boots = boots[~np.isnan(boots)]
+    lo, hi = np.quantile(boots, [alpha / 2, 1 - alpha / 2])
+    p = float(np.mean(np.abs(boots - point) >= abs(point - null)))
+    return Estimate(float(point), float(lo), float(hi), p)
+
+
+def one_sided_from_two(est: Estimate, null: float, direction: str) -> float:
+    """Convert a two-sided bootstrap p into a one-sided one ('>' or '<' than ``null``)."""
+    agrees = est.value > null if direction == ">" else est.value < null
+    return est.p_value / 2 if agrees else 1 - est.p_value / 2
 
 
 # --------------------------------------------------------------------------- regression
@@ -150,8 +176,8 @@ def expected_calibration_error(conf: Sequence[float], correct: Sequence[int], n_
 def logit_clustered(formula: str, df, cluster_col: str):
     """Logistic regression with cluster-robust SEs (clusters = questions).
 
-    Needed when one question contributes several rows (e.g. one per gold passage or one
-    per context length), which makes rows non-independent.
+    Needed when one question contributes several rows (one per condition), which makes
+    rows non-independent.
     """
     import statsmodels.api as sm
     import statsmodels.formula.api as smf
@@ -165,11 +191,3 @@ def one_sided_p(result, term: str, direction: str) -> float:
     """One-sided p-value for a regression coefficient ('<' or '>' 0)."""
     z = result.params[term] / result.bse[term]
     return float(sps.norm.cdf(z) if direction == "<" else sps.norm.sf(z))
-
-
-def wilcoxon_paired(a: Sequence[float], b: Sequence[float], alternative: str = "two-sided") -> dict:
-    a, b = np.asarray(a, float), np.asarray(b, float)
-    if np.allclose(a, b):
-        return {"statistic": 0.0, "p_value": 1.0}
-    res = sps.wilcoxon(a, b, alternative=alternative, zero_method="wilcox")
-    return {"statistic": float(res.statistic), "p_value": float(res.pvalue)}

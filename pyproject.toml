@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "hla"
 version = "0.1.0"
-description = "Context, Position and Attention in Retrieval-Augmented LLMs: a pre-registered empirical study"
+description = "Retrieval vs. Long Context: how LLMs use evidence, a pre-registered experimental study"
 requires-python = ">=3.10"
 
 [tool.setuptools.packages.find]

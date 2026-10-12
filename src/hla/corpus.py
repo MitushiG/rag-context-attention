@@ -1,9 +1,9 @@
-"""Pooled closed corpus: the union of every sampled question's candidate passages.
+"""Pooled closed corpus: the union of the candidate passages of every MuSiQue 2-hop dev
+question (~20K passages after de-duplication).
 
-Indexing 21M Wikipedia passages is out of budget. Pooling the benchmarks' own gold and
-distractor passages gives a ~15-25K passage corpus where distractors are hard (they were
-chosen to look relevant). Limitation: absolute recall numbers are higher than they would
-be on full Wikipedia; comparisons between methods are what the study relies on.
+Indexing 21M Wikipedia passages is out of budget. Pooling the benchmark's own gold and
+distractor passages gives a corpus where many distractors are hard (they were chosen to
+look relevant). Limitation: absolute recall is higher than it would be on full Wikipedia.
 """
 from __future__ import annotations
 
@@ -19,8 +19,8 @@ def build_corpus(examples: list[dict]) -> tuple[list[dict], list[dict]]:
     """Return (corpus, examples_with_ids).
 
     corpus: [{"doc_id", "title", "text"}]. Each passage in each example gets a
-    ``doc_id``; examples also get ``gold_ids`` (ordered by hop where defined) and
-    ``gold_hops`` {doc_id: hop}.
+    ``doc_id``; examples also get ``gold_ids`` (ordered by hop) and ``gold_hops``
+    {doc_id: hop}.
     """
     corpus: dict[str, dict] = {}
     out = []
@@ -40,3 +40,8 @@ def build_corpus(examples: list[dict]) -> tuple[list[dict], list[dict]]:
 
 def doc_text(doc: dict) -> str:
     return f"{doc['title']}. {doc['text']}"
+
+
+def labelled(ex: dict, doc: dict) -> dict:
+    """A corpus passage with gold labels relative to question ``ex``."""
+    return {**doc, "is_gold": doc["doc_id"] in ex["gold_hops"], "hop": ex["gold_hops"].get(doc["doc_id"])}

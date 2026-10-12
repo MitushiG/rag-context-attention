@@ -1,19 +1,22 @@
-"""Run every pre-registered test in HYPOTHESES.md and write results/summary.md.
+"""Run every pre-registered test in HYPOTHESES.md and write results/<split>/summary.md.
 
-Hypotheses whose result files are missing are skipped, so this can be re-run as
-experiments finish. CPU only.
+  python scripts/analyze.py --split main     # the confirmatory analysis
+  python scripts/analyze.py --split pilot    # sanity check only; not reported as results
+
+Experiments whose result files are missing are skipped. CPU only.
 """
-import json
+import argparse
 
 import numpy as np
 import pandas as pd
 
 from hla import stats
 from hla.data import read_jsonl
-from hla.runtime import RESULTS
+from hla.runtime import RESULTS, SPLITS
 
 lines: list[str] = []
 primary_p: dict[str, float] = {}
+EXP1_ORDER = ["closed_book", "rag", "4K", "12K", "28K", "oracle"]
 
 
 def out(s: str = "") -> None:
@@ -21,246 +24,162 @@ def out(s: str = "") -> None:
     lines.append(s)
 
 
-def load(*parts) -> pd.DataFrame | None:
-    p = RESULTS.joinpath(*parts)
+def fmt_p(p: float) -> str:
+    return "< 1e-3 (no bootstrap resample as extreme)" if p == 0 else f"{p:.3g}"
+
+
+def load(split, name) -> pd.DataFrame | None:
+    p = RESULTS / split / name
     return pd.DataFrame(read_jsonl(p)) if p.exists() else None
 
 
-# --------------------------------------------------------------------------- H1
+# --------------------------------------------------------------------------- Exp 1
 
-def h1():
-    df = load("h1", "hits.jsonl")
+def exp1(split):
+    df = load(split, "exp1.jsonl")
     if df is None:
-        return out("## H1: skipped (no results/h1/hits.jsonl)\n")
-    df = df[(df.dataset == "musique") | ((df.dataset == "hotpotqa") & (df.qtype == "bridge"))]
-    df = df[df.hop_index.notna()].copy()
-    df["hit10"] = df["hit@10"].astype(int)
-    df = df[df.retriever.isin(["bm25", "dense", "hybrid"])]
-    res = stats.logit_clustered("hit10 ~ hop_index + C(retriever) + C(dataset)", df, "qid")
-    p = stats.one_sided_p(res, "hop_index", "<")
-    primary_p["H1"] = p
-    out("## H1: single-shot retrieval misses later hops (primary)")
-    out(f"- logit coef on hop_index: {res.params['hop_index']:.3f} (SE {res.bse['hop_index']:.3f}), one-sided p = {p:.3g}")
-    for name, g in df.groupby("retriever"):
-        w = g.pivot_table(index="qid", columns="hop_index", values="hit10", aggfunc="mean")
-        if {1.0, 2.0} <= set(w.columns):
-            w = w[[1.0, 2.0]].dropna()
-            est = stats.paired_bootstrap_diff(w[1.0], w[2.0])
-            out(f"- {name}: Recall@10 hop1 - hop2 = {est} (n={len(w)})")
-    rec = df.groupby(["retriever", "hop_index"]).hit10.mean().unstack()
-    out("\nRecall@10 by retriever x hop index:\n")
-    out(rec.round(3).to_markdown())
+        return out("## Exp 1: skipped (no exp1.jsonl)\n")
+    out("## Exp 1: retrieval vs. long context\n")
+    df["log2_tokens"] = np.log2(df.context_tokens.clip(lower=1))
+    tab = df.pivot_table(index="condition", values=["em", "f1", "context_tokens", "n_gold"], aggfunc="mean")
+    out(tab.reindex([c for c in EXP1_ORDER if c in tab.index]).round(3).to_markdown())
+    out()
+
+    ranked = df[df.condition.isin(["rag", "4K", "12K", "28K"])].copy()
+    comp = ranked[ranked.retrieval_complete]
+    n_comp = comp.qid.nunique()
+    res = stats.logit_clustered("em ~ log2_tokens", comp, "qid")
+    p = stats.one_sided_p(res, "log2_tokens", "<")
+    primary_p["P1"] = p
+    out(f"**P1 (primary).** Retrieval-complete questions (n = {n_comp}): logit coefficient on "
+        f"log2(context tokens) = {res.params['log2_tokens']:.3f} (SE {res.bse['log2_tokens']:.3f}), "
+        f"one-sided p = {p:.3g}\n")
+
+    out("EM by condition and by how many gold passages the context contains:\n")
+    out(ranked.pivot_table(index="condition", columns="n_gold", values="em", aggfunc="mean")
+        .reindex(["rag", "4K", "12K", "28K"]).round(3).to_markdown())
+    out("\n(n_gold = 2 rows are evidence-*use* failures when wrong; n_gold < 2 rows may be retrieval failures.)\n")
+
+    out("Secondary: RAG vs each budget, all questions (exact McNemar, two-sided, Holm within this family)\n")
+    wide = ranked.pivot_table(index="qid", columns="condition", values="em")
+    tests = {b: stats.mcnemar_exact(wide["rag"], wide[b]) for b in ("4K", "12K", "28K")}
+    adj = stats.holm({b: t["p_value"] for b, t in tests.items()})
+    for b, t in tests.items():
+        d = stats.paired_bootstrap_diff(wide["rag"], wide[b])
+        out(f"- RAG − {b}: {d}  (RAG-only right {t['a_only']}, {b}-only right {t['b_only']}, "
+            f"p = {t['p_value']:.3g}, Holm p = {adj[b]['p_holm']:.3g})")
+
+    ranked["both_gold"] = (ranked.n_gold == 2).astype(int)
+    try:
+        r2 = stats.logit_clustered("em ~ log2_tokens * both_gold", ranked, "qid")
+        out(f"- length × both-gold-present interaction: {r2.params['log2_tokens:both_gold']:.3f} "
+            f"(SE {r2.bse['log2_tokens:both_gold']:.3f}, p = {r2.pvalues['log2_tokens:both_gold']:.3g})")
+    except Exception as e:  # sparse cells in small pilots
+        out(f"- interaction model not estimable: {e}")
+
+    best = stats.cluster_bootstrap(ranked, "qid", lambda d: float(np.argmax(
+        d.groupby("condition").em.mean().reindex(["rag", "4K", "12K", "28K"]).to_numpy())))
+    out(f"- best condition index (0 = RAG ... 3 = 28K): {best.value:.0f}, 95% bootstrap range "
+        f"[{best.ci_low:.0f}, {best.ci_high:.0f}]")
     out()
 
 
-# --------------------------------------------------------------------------- H2
+# --------------------------------------------------------------------------- Exp 2
 
-def h2():
-    s, m = load("h2", "single_shot.jsonl"), load("h2", "ircot.jsonl")
-    if s is None or m is None:
-        return out("## H2: skipped (need single_shot and ircot)\n")
-    j = s.merge(m, on="qid", suffixes=("_s", "_m"))
-    out("## H2: iteration helps only when hops exist (primary)")
-    mus = j[j.dataset_s == "musique"]
-    t = stats.mcnemar_exact(mus.em_m, mus.em_s, alternative="greater")
-    primary_p["H2"] = t["p_value"]
-    out(f"- MuSiQue: IRCoT EM {mus.em_m.mean():.3f} vs single-shot {mus.em_s.mean():.3f}; "
-        f"McNemar one-sided p = {t['p_value']:.3g} (IRCoT-only {t['a_only']}, single-only {t['b_only']})")
-    for ds, g in j.groupby("dataset_s"):
-        t = stats.mcnemar_exact(g.em_m, g.em_s)
-        est = stats.paired_bootstrap_diff(g.em_m, g.em_s)
-        calls = g.llm_calls_m.mean()
-        out(f"- {ds}: EM diff (IRCoT - single) = {est}; McNemar two-sided p = {t['p_value']:.3g}; IRCoT mean LLM calls = {calls:.2f}")
-        if ds == "nq":
-            eq = -0.03 < est.ci_low and est.ci_high < 0.03
-            out(f"  - NQ equivalence within ±3 pts: {'yes' if eq else 'not shown'}")
-    long = pd.concat([
-        mus[["qid", "hops_s", "em_s"]].rename(columns={"hops_s": "hops", "em_s": "em"}).assign(method="single"),
-        mus[["qid", "hops_s", "em_m"]].rename(columns={"hops_s": "hops", "em_m": "em"}).assign(method="ircot"),
-    ])
-    long["em"] = long.em.astype(int)
-    res = stats.logit_clustered("em ~ C(method, Treatment('single')) * hops", long, "qid")
-    term = "C(method, Treatment('single'))[T.ircot]:hops"
-    out(f"- MuSiQue method x hops interaction: {res.params[term]:.3f} (SE {res.bse[term]:.3f}), "
-        f"one-sided p = {stats.one_sided_p(res, term, '>'):.3g}")
-    for name in ("closed_book", "oracle"):
-        d = load("h2", f"{name}.jsonl")
-        if d is not None:
-            out(f"- {name} EM by dataset: " + ", ".join(f"{k}={v:.3f}" for k, v in d.groupby("dataset").em.mean().items()))
-    out()
-
-
-# --------------------------------------------------------------------------- H3
-
-def _crossover(df) -> float:
-    r = stats.logit_clustered("em ~ np.log2(target_tokens) * C(condition) + C(dataset)", df, "qid")
-    b_rag = r.params["C(condition)[T.rag]"]
-    b_int = r.params["np.log2(target_tokens):C(condition)[T.rag]"]
-    return float(2 ** (-b_rag / b_int)) if b_int != 0 else float("nan")
-
-
-def h3():
-    df = load("h3", "length.jsonl")
+def exp2(split):
+    df = load(split, "exp2.jsonl")
     if df is None:
-        return out("## H3: skipped\n")
-    df["em"] = df.em.astype(int)
-    out("## H3: long context loses to RAG past a crossover length (primary)")
-    res = stats.logit_clustered("em ~ np.log2(target_tokens) * C(condition) + C(dataset)", df, "qid")
-    term = "np.log2(target_tokens):C(condition)[T.rag]"
-    p = stats.one_sided_p(res, term, ">")
-    primary_p["H3"] = p
-    out(f"- interaction (RAG degrades less per doubling of length): {res.params[term]:.3f} "
-        f"(SE {res.bse[term]:.3f}), one-sided p = {p:.3g}")
-    out("\nEM by condition x length:\n")
-    out(df.pivot_table(index="length_name", columns="condition", values="em", aggfunc="mean")
-        .reindex(["2K", "8K", "16K", "32K"]).round(3).to_markdown())
-    x = _crossover(df)
-    by_q = {q: g for q, g in df.groupby("qid")}
-    qids = list(by_q)
-    rng = np.random.default_rng(13)
-    boots = []
-    for _ in range(1000):  # cluster bootstrap: resample whole questions
-        pick = rng.choice(qids, size=len(qids), replace=True)
-        parts = [by_q[q].assign(qid=f"{q}#{i}") for i, q in enumerate(pick)]
-        try:
-            boots.append(_crossover(pd.concat(parts)))
-        except Exception:
-            pass
-    boots = np.array([b for b in boots if np.isfinite(b)])
-    lo, hi = np.quantile(boots, [0.025, 0.975]) if len(boots) else (np.nan, np.nan)
-    inside = 2_000 <= x <= 31_000
-    out(f"\n- crossover length: {x:,.0f} tokens [{lo:,.0f}, {hi:,.0f}] "
-        f"({'inside' if inside else 'outside'} the tested 2K-32K range)")
+        return out("## Exp 2: skipped (no exp2.jsonl)\n")
+    out("## Exp 2: attention to gold evidence\n")
+    e1 = df[df.source == "exp1"].copy()
+    est = stats.cluster_bootstrap(e1, "qid", lambda d: stats.stratified_auroc(d.gold_share, d.em, d.condition), null=0.5)
+    p = stats.one_sided_from_two(est, 0.5, ">")
+    primary_p["P2"] = p
+    out(f"**P2 (primary).** Condition-stratified AUROC of gold attention share for correctness "
+        f"(Exp 1 rows with both golds in context, n = {len(e1)} rows / {e1.qid.nunique()} questions): "
+        f"{est.value:.3f} [{est.ci_low:.3f}, {est.ci_high:.3f}], one-sided p = {fmt_p(p)}\n")
+
+    per = []
+    for c, g in e1.groupby("condition"):
+        per.append({"condition": c, "n": len(g), "EM": g.em.mean(), "gold share": g.gold_share.mean(),
+                    "length-proportional share": g.gold_length_share.mean(),
+                    "AUROC": stats.auroc(g.gold_share, g.em)})
+    out(pd.DataFrame(per).set_index("condition").reindex(["rag", "4K", "12K", "28K"]).dropna(how="all").round(3).to_markdown())
     out()
 
+    e1["log2_tokens"] = np.log2(e1.context_tokens)
+    e1["share_z"] = (e1.gold_share - e1.gold_share.mean()) / e1.gold_share.std()
+    e1["log_lift"] = np.log(e1.gold_share / e1.gold_length_share)
+    r = stats.logit_clustered("em ~ share_z * log2_tokens", e1, "qid")
+    out(f"- logit em ~ share_z × log2(tokens): share_z {r.params['share_z']:.3f} (p = {r.pvalues['share_z']:.3g}), "
+        f"interaction {r.params['share_z:log2_tokens']:.3f} (p = {r.pvalues['share_z:log2_tokens']:.3g})")
+    lift = stats.cluster_bootstrap(e1, "qid", lambda d: stats.stratified_auroc(d.log_lift, d.em, d.condition), null=0.5)
+    out(f"- robustness, length-adjusted share (log lift): stratified AUROC {lift}")
 
-# --------------------------------------------------------------------------- H4, H5
-
-def _quadratic(df, y, cluster, logistic=True):
-    if logistic:
-        r = stats.logit_clustered(f"{y} ~ gold_position + I(gold_position**2)", df, cluster)
-    else:
+    e3 = df[df.source == "exp3"]
+    if len(e3):
         import statsmodels.formula.api as smf
-
-        groups = df[cluster].astype("category").cat.codes.to_numpy()
-        r = smf.ols(f"{y} ~ gold_position + I(gold_position**2)", df).fit(cov_type="cluster", cov_kwds={"groups": groups})
-    b1, b2 = r.params["gold_position"], r.params["I(gold_position ** 2)"]
-    vertex = -b1 / (2 * b2) if b2 != 0 else float("nan")
-    p = stats.one_sided_p(r, "I(gold_position ** 2)", ">")
-    return b2, p, vertex
-
-
-def h4():
-    pos, gap = load("h4", "position.jsonl"), load("h4", "gap.jsonl")
-    out("## H4: position effects (secondary, uncorrected)")
-    if pos is not None:
-        pos["em"] = pos.em.astype(int)
-        b2, p, v = _quadratic(pos, "em", "qid")
-        u = b2 > 0 and 1 < v < 20
-        out(f"- (a) quadratic term {b2:.4f}, one-sided p = {p:.3g}, vertex at position {v:.1f} -> U-shape {'supported' if u and p < 0.05 else 'not supported'}")
-        out("  EM by position: " + ", ".join(f"{k}: {v:.3f}" for k, v in pos.groupby("gold_position").em.mean().items()))
-    if gap is not None:
-        gap["em"] = gap.em.astype(int)
-        r = stats.logit_clustered("em ~ gap", gap, "qid")
-        out(f"- (b) slope on gap: {r.params['gap']:.4f}, one-sided p = {stats.one_sided_p(r, 'gap', '<'):.3g}")
-        out("  EM by gap: " + ", ".join(f"{k}: {v:.3f}" for k, v in gap.groupby("gap").em.mean().items()))
+        g = e3.groupby(["location", "separation"])[["gold_share", "hop1_share", "hop2_share", "em"]].mean()
+        out("\nExp 3 contexts: mean shares by layout\n")
+        out(g.round(3).to_markdown())
+        ols = smf.ols("gold_share ~ C(location) * C(separation)", e3).fit(
+            cov_type="cluster", cov_kwds={"groups": e3.qid.astype("category").cat.codes})
+        out(f"\n- OLS gold_share ~ location × separation (clustered): far main effect "
+            f"{ols.params['C(separation)[T.far]']:.4f} (p = {ols.pvalues['C(separation)[T.far]']:.3g})")
     out()
 
 
-def h5():
-    df = load("h5", "attention.jsonl")
+# --------------------------------------------------------------------------- Exp 3
+
+def exp3(split):
+    df = load(split, "exp3.jsonl")
     if df is None:
-        return out("## H5: skipped\n")
-    out("## H5: attention tracks evidence use (secondary, correlational)")
-    est = stats.auroc_ci(df.gold_share, df.em.astype(int))
-    out(f"- (a) AUROC of gold attention share for correctness: {est} -> "
-        f"{'supported' if est.ci_low > 0.5 else 'not supported'}")
-    b2, p, v = _quadratic(df, "gold_share", "qid", logistic=False)
-    out(f"- (b) quadratic term on attention share {b2:.5f}, one-sided p = {p:.3g}, vertex {v:.1f}")
-    out("  mean gold share by position: " + ", ".join(
-        f"{k}: {x:.3f}" for k, x in df.groupby("gold_position").gold_share.mean().items())
-        + f" (uniform = {df.uniform_share.iloc[0]:.3f})")
+        return out("## Exp 3: skipped (no exp3.jsonl)\n")
+    out("## Exp 3: relative position of the two gold passages\n")
+    out(df.pivot_table(index="location", columns="separation", values="em", aggfunc="mean")
+        .reindex(["early", "middle", "late"]).round(3).to_markdown())
     out()
+    res = stats.logit_clustered("em ~ C(location) + far", df, "qid")
+    p = stats.one_sided_p(res, "far", "<")
+    primary_p["P3"] = p
+    out(f"**P3 (primary).** logit coefficient on far (adjusting for location) = {res.params['far']:.3f} "
+        f"(SE {res.bse['far']:.3f}, odds ratio {np.exp(res.params['far']):.2f}), one-sided p = {p:.3g}\n")
 
-
-# --------------------------------------------------------------------------- H6
-
-def h6():
-    df = load("h6", "vidore.jsonl")
-    if df is None:
-        return out("## H6: skipped\n")
-    out("## H6: looking beats reading on visual pages (secondary)")
-    gains = {}
-    for grp, g in df.groupby("group"):
-        w = g.pivot_table(index=["subset", "query"], columns="method", values="ndcg@5", aggfunc="first").dropna()
-        best_ocr = max(("ocr_bm25", "ocr_dense"), key=lambda m: w[m].mean())
-        t = stats.wilcoxon_paired(w["colqwen"], w[best_ocr], alternative="greater")
-        gains[grp] = (w["colqwen"] - w[best_ocr]).to_numpy()
-        out(f"- {grp}: nDCG@5 ColQwen {w.colqwen.mean():.3f} vs {best_ocr} {w[best_ocr].mean():.3f}; "
-            f"Wilcoxon one-sided p = {t['p_value']:.3g} (n={len(w)})")
-    if {"visual", "text"} <= set(gains):
-        rng = np.random.default_rng(13)
-        v, t_ = gains["visual"], gains["text"]
-        boots = [rng.choice(v, len(v)).mean() - rng.choice(t_, len(t_)).mean() for _ in range(10_000)]
-        lo, hi = np.quantile(boots, [0.025, 0.975])
-        out(f"- interaction (visual gain - text gain): {v.mean() - t_.mean():.3f} [{lo:.3f}, {hi:.3f}]")
-    out()
-
-
-# --------------------------------------------------------------------------- H7
-
-def h7():
-    s = load("h2", "single_shot.jsonl")
-    if s is None:
-        return out("## H7: skipped\n")
-    out("## H7: confidence routing (primary)")
-    au = {}
-    for ds, g in s.groupby("dataset"):
-        est = stats.auroc_ci(g.confidence, g.em.astype(int))
-        ece = stats.expected_calibration_error(g.confidence, g.em.astype(int))
-        au[ds] = g
-        out(f"- (a) {ds}: AUROC {est}, ECE {ece:.3f}")
-    if {"nq", "musique"} <= set(au):
-        a, b = au["nq"], au["musique"]
-        rng = np.random.default_rng(13)
-        diffs = []
-        for _ in range(10_000):
-            ia, ib = rng.integers(0, len(a), len(a)), rng.integers(0, len(b), len(b))
-            diffs.append(stats.auroc(a.confidence.values[ia], a.em.values[ia])
-                         - stats.auroc(b.confidence.values[ib], b.em.values[ib]))
-        diffs = np.array(diffs)
-        point = stats.auroc(a.confidence, a.em) - stats.auroc(b.confidence, b.em)
-        p = float(np.mean(diffs - point >= point))  # shift method, one-sided H1: diff > 0
-        primary_p["H7"] = p
-        lo, hi = np.nanquantile(diffs, [0.025, 0.975])
-        out(f"- (a) AUROC(NQ) - AUROC(MuSiQue) = {point:.3f} [{lo:.3f}, {hi:.3f}], one-sided p = {p:.3g}")
-    rpath = RESULTS / "h7" / "router.json"
-    if rpath.exists():
-        r = json.loads(rpath.read_text())
-        o = np.load(RESULTS / "h7" / "test_outcomes.npz")
-        em = stats.paired_bootstrap_diff(o["router"], o["ircot"])
-        calls = stats.paired_bootstrap_diff(o["router_calls"], o["ircot_calls"])
-        out(f"- (b) held-out half (n={r['test_n']}), threshold {r['threshold']:.3f}:")
-        out(f"  - router EM {r['router']['em']:.3f}, calls {r['router']['mean_calls']:.2f}, escalation {r['router']['escalation_rate']:.2%}")
-        out(f"  - always single EM {r['always_single']['em']:.3f} (1 call); always IRCoT EM {r['always_ircot']['em']:.3f}, calls {r['always_ircot']['mean_calls']:.2f}")
-        out(f"  - router - IRCoT: EM {em}; calls {calls}")
+    full = stats.logit_clustered("em ~ C(location) * far", df, "qid")
+    inter = [t for t in full.params.index if ":" in t]
+    w = full.wald_test(" , ".join(f"{t} = 0" for t in inter), scalar=True)
+    out(f"- location × separation interaction (Wald, {len(inter)} df): p = {float(w.pvalue):.3g}")
+    for loc, g in df.groupby("location"):
+        wide = g.pivot_table(index="qid", columns="separation", values="em")
+        t = stats.mcnemar_exact(wide["close"], wide["far"])
+        out(f"- {loc}: close − far = {t['diff']:+.3f} (exact McNemar p = {t['p_value']:.3g})")
+    df["hop1_first"] = df.hop1_first.astype(int)
+    r = stats.logit_clustered("em ~ C(location) + far * hop1_first", df, "qid")
+    out(f"- hop-1 passage first: {r.params['hop1_first']:.3f} (p = {r.pvalues['hop1_first']:.3g}); "
+        f"far × hop1_first {r.params['far:hop1_first']:.3f} (p = {r.pvalues['far:hop1_first']:.3g})")
     out()
 
 
 def main():
-    out("# Results summary\n")
-    out("_Generated by scripts/analyze.py. Tests as pre-registered in HYPOTHESES.md._\n")
-    for f in (h1, h2, h3, h4, h5, h6, h7):
-        f()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--split", choices=SPLITS, default="main")
+    args = ap.parse_args()
+    out(f"# Results ({args.split})\n")
+    if args.split == "pilot":
+        out("> Pilot run: implementation check only, not confirmatory.\n")
+    for f in (exp1, exp2, exp3):
+        f(args.split)
     if primary_p:
-        out("## Holm–Bonferroni across primary hypotheses\n")
-        out("| Hypothesis | p | Holm-adjusted p | Reject H0 at 0.05 |\n|---|---|---|---|")
-        for k, v in stats.holm(primary_p).items():
-            out(f"| {k} | {v['p']:.3g} | {v['p_holm']:.3g} | {'yes' if v['reject'] else 'no'} |")
-        missing = {"H1", "H2", "H3", "H7"} - set(primary_p)
-        if missing:
-            out(f"\n_Missing primary hypotheses (correction will change once they are added): {sorted(missing)}_")
-    (RESULTS / "summary.md").write_text("\n".join(lines) + "\n")
+        out("## Primary tests, Holm–Bonferroni across P1–P3\n")
+        out("| test | p | Holm p | reject at 0.05 |\n|---|---|---|---|")
+        for k, v in sorted(stats.holm(primary_p).items()):
+            out(f"| {k} | {fmt_p(v['p'])} | {fmt_p(v['p_holm'])} | {v['reject']} |")
+        if len(primary_p) < 3:
+            out("\n(Holm applied only to the tests available so far; rerun when all three are done.)")
+    path = RESULTS / args.split / "summary.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n")
+    print(f"\nwrote {path}")
 
 
 if __name__ == "__main__":

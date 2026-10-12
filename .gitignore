@@ -9,8 +9,7 @@ __pycache__/
 data/raw/
 data/processed/
 
-# large or regenerable outputs; summary.md is committed
+# large or regenerable outputs; summary.md and power.md are committed
 results/**/*.jsonl
 results/**/*.npy
 results/**/*.npz
-results/h6/ocr/
