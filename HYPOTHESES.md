@@ -2,7 +2,7 @@
 
 Any later change to a hypothesis, metric, sample or test goes in
 the **Amendments** section at the bottom, with a date and a reason. Earlier text is never
-edited silently.
+edited.
 
 ## Common design
 
