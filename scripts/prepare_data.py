@@ -1,35 +1,39 @@
-"""Load MuSiQue 2-hop dev, pool the corpus, and fix the question order (seed 13).
+"""Download, sample (seed 13) and pool the corpus.
 
 Writes
-  data/samples/pilot_ids.txt       50 pilot questions (never used in the main analysis)
-  data/samples/main_pool_ids.txt   every other question, in a fixed random order;
-                                   scripts/power.py takes the main sample as a prefix
+  data/samples/nq_ids.txt          200 NQ questions (Exp 1 and Exp 2)
+  data/samples/musique_ids.txt     200 MuSiQue 2-hop questions (Exp 2)
+  data/samples/attention_ids.txt   the first 100 NQ questions (Exp 1 attention probe)
   data/processed/examples.jsonl, corpus.jsonl   (git-ignored, regenerated from raw)
 
-Commit the two id files before running anything on a GPU.
+Commit the id files before running anything on a GPU.
 """
 from hla.corpus import build_corpus
-from hla.data import load_musique_2hop, split_pilot, write_jsonl
+from hla.data import load_musique_2hop, load_nq, sample, write_jsonl
 from hla.runtime import PROCESSED, SAMPLES
 
 SEED = 13
-N_PILOT = 50
+N = 200
+N_ATTENTION = 100
 
 
 def main():
-    examples = load_musique_2hop()
-    # The corpus pools every 2-hop dev question's passages, not only the sampled ones,
-    # so the retriever and the expanded contexts see a realistic number of passages.
-    corpus, examples = build_corpus(examples)
-    write_jsonl(examples, PROCESSED / "examples.jsonl")
-    write_jsonl(corpus, PROCESSED / "corpus.jsonl")
+    nq_all, mq_all = load_nq(), load_musique_2hop()
+    # The corpus pools every question's passages, not only the sampled ones, so retrieval
+    # and the long contexts draw on a realistic number of passages.
+    corpus, examples = build_corpus(nq_all + mq_all)
+    by_id = {e["qid"]: e for e in examples}
+    nq = sample([e for e in examples if e["dataset"] == "nq"], N, SEED)
+    mq = sample([e for e in examples if e["dataset"] == "musique"], N, SEED)
 
-    pilot, pool = split_pilot(examples, N_PILOT, SEED)
+    write_jsonl([by_id[e["qid"]] for e in nq + mq], PROCESSED / "examples.jsonl")
+    write_jsonl(corpus, PROCESSED / "corpus.jsonl")
     SAMPLES.mkdir(parents=True, exist_ok=True)
-    (SAMPLES / "pilot_ids.txt").write_text("\n".join(e["qid"] for e in pilot) + "\n")
-    (SAMPLES / "main_pool_ids.txt").write_text("\n".join(e["qid"] for e in pool) + "\n")
-    print(f"2-hop questions: {len(examples)}  pilot: {len(pilot)}  main pool: {len(pool)}  "
-          f"corpus passages: {len(corpus)}")
+    for name, ids in [("nq", [e["qid"] for e in nq]), ("musique", [e["qid"] for e in mq]),
+                      ("attention", [e["qid"] for e in nq[:N_ATTENTION]])]:
+        (SAMPLES / f"{name}_ids.txt").write_text("\n".join(ids) + "\n")
+    print(f"NQ {len(nq_all)} -> {len(nq)}; MuSiQue 2-hop {len(mq_all)} -> {len(mq)}; "
+          f"corpus passages {len(corpus)}")
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
-"""Pooled closed corpus: the union of the candidate passages of every MuSiQue 2-hop dev
-question (~20K passages after de-duplication).
+"""Pooled closed corpus: the union of the candidate passages of every NQ (Lost in the
+Middle release) and MuSiQue 2-hop dev question (~70K passages after de-duplication).
 
 Indexing 21M Wikipedia passages is out of budget. Pooling the benchmark's own gold and
 distractor passages gives a corpus where many distractors are hard (they were chosen to

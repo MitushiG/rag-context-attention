@@ -1,175 +1,168 @@
-# Pre-registration: Retrieval vs. Long Context — How LLMs Use Evidence
+# Pre-registration: How Long Should a RAG Prompt Be, and Does Iterative Retrieval Help?
 
 Any later change to a question, metric, sample or test goes in the **Amendments**
 section at the bottom, with a date and a reason. Earlier text is never edited.
 
-This version replaces an earlier seven-hypothesis design (see git history). The study
-was narrowed to three experiments **before any data was collected**; see Amendments.
+This version replaces two earlier designs (see git history and Amendments). It was
+written **before any data was downloaded or any experiment was run**.
 
-## Three questions
+## Two experiments
 
-| | Question | Level |
-|---|---|---|
-| **Exp 1** | As more lower-ranked text is added to the context, does accuracy fall, and does top-k retrieval beat long context? | system behaviour |
-| **Exp 2** | Is the model more likely to answer correctly when its attention is concentrated on the gold passages? | internal behaviour |
-| **Exp 3** | Does separating the two required passages hurt, even when both are present and the context length is fixed? | evidence geometry |
+| | Question |
+|---|---|
+| **Exp 1** | How does prompt length affect a model that *always* has the answer in its context, why, and what prompt length is best for RAG once retrieval is taken into account? |
+| **Exp 2** | Does iterative retrieval (IRCoT) beat single-shot retrieval on multi-hop questions, is the gain from re-retrieving rather than from reasoning, and does single-hop stay the same? |
 
-Each experiment has **one primary test** (P1, P2, P3). The three primary p-values are
-corrected together with Holm–Bonferroni at family-wise α = 0.05. Everything else is
-secondary and is reported as such.
+**Primary tests:** H1, H2, H4 and H6, corrected together with Holm–Bonferroni at
+family-wise α = 0.05. H3 (tiny models, 3 seeds) is descriptive; H5 and everything
+marked *secondary* are reported as such.
 
 ## Shared setup
 
 | | |
 |---|---|
-| Dataset | MuSiQue-Ans v1.0 dev, **2-hop questions only** (answerable; exactly 2 gold passages with hop order 1, 2; at least 18 distractors) |
-| Corpus | every passage of every 2-hop dev question, de-duplicated (closed corpus) |
-| Generator | `Qwen/Qwen2.5-7B-Instruct`, greedy decoding, ≤ 32 new tokens, vLLM |
-| Retriever | `intfloat/e5-base-v2` dense retrieval, the study's only retriever |
-| Prompt | one fixed QA prompt for every condition (`hla.pipelines.qa_body`) |
-| Primary metric | exact match (EM) after SQuAD normalization, best over answer aliases; F1 is secondary |
+| Single-hop data | NQ-Open, "Lost in the Middle" 20-document release: one gold passage per question, 19 retrieved passages without the answer |
+| Multi-hop data | MuSiQue-Ans v1.0 dev, 2-hop, answerable, one hop-1 and one hop-2 gold passage |
+| Sample | 200 NQ and 200 MuSiQue questions, drawn once with seed 13 (`scripts/prepare_data.py`); the first 100 NQ questions are the attention subset. No pilot or power analysis: the sample size is fixed by the compute budget. |
+| Corpus | every passage of every NQ (release) and MuSiQue 2-hop dev question, de-duplicated (closed corpus) |
+| Generator | `Qwen/Qwen2.5-7B-Instruct`, greedy decoding, vLLM, 32K-token window |
+| Retriever | `intfloat/e5-base-v2` dense retrieval (the only retriever) |
+| Metric | exact match (EM) after SQuAD normalization, best over answer aliases; F1 secondary |
 
-MuSiQue 2-hop is used because its questions were built so a single passage is not
-enough. Every 2-hop question has the same structure (two gold passages and 18
-distractors), which Exp 3 needs.
-
-**Sample.** `scripts/prepare_data.py` shuffles the eligible questions once (seed 13).
-The first 50 are the **pilot**; the rest, in that fixed order, are the main pool.
-
-**Pilot (50 questions).** Run all three experiments on the pilot to check the pipeline
-and to measure base rates. Pilot questions are never part of the main analysis. After
-the pilot, only two things may change, and both are logged here as amendments before
-the main run:
-1. feasibility settings (the token budgets, if a budget fails on the available GPU);
-2. the prompt, only if answers are systematically unparseable (e.g. the model writes
-   sentences instead of short answers).
-
-**Sample size.** `scripts/power.py` simulates P1 and P3 with the pilot's base rates, a
-per-question random intercept (SD 1.5 on the logit scale) and the same clustered
-regressions used in the analysis. The smallest effects of interest are:
-- P1: an 8-point EM drop from RAG to the 28K budget among retrieval-complete questions;
-- P3: a 5-point EM drop from close to far gold passages.
-
-N is the smallest value in {200, 300, 400, 500, 600} at which both P1 and P3 reach 80%
-power at one-sided α = 0.05/3 (the strictest Holm step). If none does, N = 600, the
-largest sample the compute budget allows, and the achieved power is reported. The main
-sample is the **first N questions of the main pool**, so it does not depend on what the
-pilot showed. `data/samples/main_ids.txt` and `results/pilot/power.md` are committed
-before the main run.
-
-**Clustering.** Every question appears in several conditions, so every regression uses
-question-clustered robust standard errors and every bootstrap resamples whole questions.
+Every question appears in several conditions, so all regressions use question-clustered
+robust standard errors and every bootstrap resamples whole questions.
 
 ---
 
-## Exp 1 — Retrieval vs. long context
+## Exp 1A — Accuracy vs prompt length, with the gold passage always present
 
-**Design.** For each question, rank the whole corpus once with the retriever. Each
-condition gives the model a **prefix of that ranking**:
+The gold passage is always in the prompt, so retrieval plays no part.
 
-| Condition | Context |
+| Factor | Levels |
 |---|---|
-| RAG | top 5 passages (~0.7K tokens) |
-| 4K / 12K / 28K | as many top-ranked passages as fit in 4,000 / 12,000 / 28,000 tokens |
-| closed-book, oracle | no passages / the two gold passages only (reference points, not tested) |
+| Length | 2K, 8K, 16K, 30K tokens |
+| Distractors | **related**: the retriever's ranking for the question, most similar first; **unrelated**: random corpus passages |
+| Gold position | start / middle / end |
 
-Because contexts are nested prefixes, a longer budget only ever *adds* lower-ranked
-passages. For every condition we record how many gold passages the context contains and
-the rank of each gold passage, so retrieval failures (gold absent) can be separated from
-evidence-use failures (gold present, answer wrong).
+Distractors never include a passage that contains an answer string. For each question
+and distractor type, a longer budget only *adds* passages. Reference conditions:
+closed-book, gold passage only, and related distractors at 2K **without** the gold.
 
-**P1 (primary).** Among **retrieval-complete** questions (both gold passages are in the
-RAG top 5, hence in every condition), every passage added by a longer budget is a
-non-gold passage. We test whether this extra text lowers accuracy:
+**H1 (primary).** Accuracy falls as the prompt gets longer.
 
-    logit P(EM) = β₀ + β₁ · log2(context tokens),   rows = RAG, 4K, 12K, 28K
+    logit P(EM) = β₀ + β₁ · log2(context tokens) + distractor type + gold position
 
-with question-clustered SEs. **One-sided test of β₁ < 0.**
+over the 24 length × type × position conditions. One-sided test of **β₁ < 0**.
 
-**Secondary.**
-- All questions: RAG vs each budget, exact McNemar (two-sided), Holm-corrected within
-  these three comparisons, with paired-bootstrap CIs on the EM difference. This is the
-  system-level answer to "does retrieval beat long context?", where longer contexts can
-  also *gain* gold passages that the top 5 missed.
-- Interaction: `em ~ log2(tokens) × both-golds-present`, to see whether the length
-  penalty differs when the evidence is complete.
-- EM by condition × number of gold passages present.
-- The best condition, with a question-level bootstrap distribution. A "crossover" is
-  reported only if this distribution supports one.
+*Secondary:* length × distractor-type interaction (expected: related text hurts more);
+gold only vs 30K per distractor type (paired bootstrap); EM per 1K tokens.
 
----
+## Exp 1B — The best RAG prompt length
 
-## Exp 2 — Does attention to gold evidence predict correctness?
+Combines the two curves measured separately:
 
-**Design.** No new generations. For every Exp 1 row (RAG, 4K, 12K, 28K) **with both
-gold passages in context**, and every Exp 3 row, re-run the model on the same prompt
-with its own answer appended (teacher forcing) and read attention from the positions
-that predict the answer tokens.
+- **retriever curve** R(k): share of questions whose gold passage is in the top k;
+- **reader curve**: EM vs log2(tokens) from Exp 1A (gold only, then related
+  distractors averaged over positions), linearly interpolated;
+- **gold-absent accuracy** a₀: EM of the "related distractors at 2K, no gold" condition.
 
-**Attention share (fixed before any data).** For each layer: average the attention
-rows of the answer-predicting positions over heads and answer tokens; sum the mass on
-each passage's tokens; normalize so the passages sum to 1. The **gold share** is the
-sum over the two gold passages, averaged over the upper half of layers (layers 14–27 of
-28). Implementation: `hla.attention`, checked against eager attention.
+Predicted RAG EM(k) = R(k) · reader(tokens of k passages) + (1 − R(k)) · a₀, for
+k = 1 … 200. **Best length = the smallest k whose predicted EM is within 1 EM point of
+the maximum** (the most accuracy per token without giving up accuracy). 95% interval
+for the best k by question-level bootstrap. Predicted EM per 1K tokens is reported for
+every k.
 
-**P2 (primary).** Using the Exp 1 rows: the **condition-stratified AUROC** of gold share
-for EM (AUROC computed within each of RAG / 4K / 12K / 28K and averaged, weighted by the
-number of correct–incorrect pairs). Stratifying stops context length, which lowers both
-attention share and accuracy, from producing a high AUROC on its own. 95% CI by
-question-level bootstrap (2,000 resamples). **One-sided test of AUROC > 0.5.**
+*Check:* real top-k RAG at k = 1, 5, 20, 50 (rank order). The prediction is supported
+if it falls inside the observed 95% CI at most of these k. This is reported, not tested.
 
-**Secondary.**
-- AUROC within each condition; mean gold share vs the share the gold passages would get
-  if attention were proportional to their length.
-- `em ~ share_z × log2(tokens)`: does the association change with context length?
-- Robustness: stratified AUROC of the length-adjusted share, log(gold share / length share).
-- Exp 3 rows: does gold share change with location and separation? (OLS, clustered.)
+## Exp 1 — Attention on the gold passage (100 questions)
 
-**Interpretation limit.** This is an association. A high AUROC does not show that
-attention *causes* correct answers: attention weights are not a faithful explanation
-(Jain & Wallace, 2019), and no intervention is made.
+For every Exp 1A condition with the gold passage present (and gold only): teacher-force
+the model's own answer and read attention from the positions that predict the answer
+tokens. Per layer, average over heads and answer tokens, sum the mass on each passage,
+and normalize over passages. **Gold share** = the gold passage's share, averaged over
+the upper half of layers (14–27 of 28). Implementation: `hla.attention`, checked against
+eager attention.
 
----
+**H2 (primary).** Gold share predicts correctness: the **condition-stratified AUROC**
+(computed within each condition, averaged with weights = number of correct–incorrect
+pairs) is > 0.5. One-sided, question-level bootstrap (2,000 resamples). Stratifying
+stops length, which lowers both share and accuracy, from producing the AUROC by itself.
 
-## Exp 3 — Does the relative position of the two gold passages matter?
+*Secondary:* log(gold share) vs log2(length) by distractor type (slope −1 = pure 1/n
+dilution); robustness with the length-adjusted share log(share / length share).
 
-**Design.** 20 passages per question: its 18 own distractors in a fixed (seeded) order,
-plus its two gold passages. Both gold passages are **always present**. Only their slots
-change; the passages, their order otherwise, and the total length are identical across
-conditions. Close and far pairs share the same midpoint, so location and separation
-vary independently:
+**Limit:** on Qwen this is an association, not a cause (Jain & Wallace, 2019). Exp 1C
+supplies the interventions.
 
-| Location (pair midpoint) | Close (0 passages between) | Far (8 passages between) |
-|---|---|---|
-| Early (5.5) | slots 5, 6 | slots 1, 10 |
-| Middle (10.5) | slots 10, 11 | slots 6, 15 |
-| Late (15.5) | slots 15, 16 | slots 11, 20 |
+## Exp 1C — Why: a tiny GPT on a synthetic lookup task
 
-Which hop comes first is drawn once per question (seeded), kept across all six
-conditions, and recorded.
+`foundations/tiny_recall.py`. N facts "k k k v", then 8 queries (distinct keys from the
+facts), each to be answered with that key's value; earlier queries are followed by
+their answer, so one sequence gives 8 training signals. Accuracy and attention are
+measured on the final query. Related distractors share the query key's first symbol;
+unrelated keys are random. Train on N = 8–64 (drawn per batch; half related, half
+unrelated); test on N = 16, 32, 64, 128, 256, 512. 4 layers, 4 heads, width 128;
+8,000 steps; seeds 0, 1, 2. A run counts only if its final training accuracy is ≥ 0.95.
+(Design note: a CPU check before any experiment showed single-query training at N = 64
+stays at chance, hence multi-query training and mixed lengths.)
 
-**P3 (primary).**
+| Variant | Change |
+|---|---|
+| rope | rotary positions (baseline) |
+| learned | learned absolute positions; positions beyond training are never trained |
+| none | no position encoding |
+| rope_ssmax | rope + learned length-aware attention scaling, s · log n (scalable softmax) |
 
-    logit P(EM) = β₀ + location effects + β_far · far
+Inference-time intervention on every trained model: multiply attention logits by
+max(1, log n / log n_train), which is identical inside the training length.
 
-with question-clustered SEs. **One-sided test of β_far < 0** (far apart is worse, after
-accounting for location).
-
-**Secondary.**
-- Location × separation interaction (Wald test, 2 df).
-- Close vs far within each location (exact McNemar).
-- Whether hop-1-first order matters, and whether it changes the separation effect.
+**H3 (descriptive).** (a) *learned* collapses beyond N = 64 while *rope* degrades
+gradually; (b) the share of attention on the needle falls as N grows; (c) log-n scaling
+(at inference) and *rope_ssmax* (in training) reduce both the attention-share loss and
+the accuracy loss beyond the training length. Reported as means with the range over
+seeds; not part of the Holm family.
 
 ---
 
-## What the three results can and cannot say
+## Exp 2 — Single-shot vs chain of thought vs iterative retrieval
 
-- Exp 1 isolates the effect of extra *lower-ranked* text on one retriever's rankings over
-  a closed corpus. It does not cover random or adversarial filler, or open-web retrieval.
-- Exp 2 is correlational (see above).
-- Exp 3 holds length and content fixed, so a separation effect cannot be explained by
-  missing evidence or longer inputs.
-- One model, one dataset, one retriever: effects may differ for other models and sizes.
+| Method | |
+|---|---|
+| single | top 5 passages, direct answer |
+| single_cot | the same top 5, reason step by step, then "So the answer is: …" |
+| ircot | start from the top 5; each reasoning sentence becomes the next query, adding up to 3 new passages (max 15 passages, max 5 steps) until an answer is stated |
+| oracle | gold passages only (reference) |
+
+If a chain of thought never states an answer, one direct-answer call over the same
+passages is made (recorded as `fallback`). For every method we record EM, which gold
+passages ended up in context (for IRCoT, after every step), LLM calls and tokens.
+
+**H4 (primary).** On MuSiQue, IRCoT is more accurate than single-shot. One-sided exact
+McNemar test.
+
+**H5 (secondary).** The gain comes from re-retrieval: it is concentrated in questions
+where single-shot missed a gold passage, and near zero where single-shot already had
+both. Also reported: single_cot vs single and ircot vs single_cot on MuSiQue (exact
+McNemar, two-sided), and the share of questions with both gold passages after each step.
+
+**H6 (primary).** The IRCoT gain is smaller on NQ than on MuSiQue:
+
+    logit P(EM) = β₀ + β₁ · ircot + β₂ · nq + β₃ · ircot × nq   (single and ircot rows)
+
+One-sided test of **β₃ < 0**. *Secondary:* equivalence on NQ, 90% CI of (IRCoT −
+single) inside ±3 EM points; with 200 questions this is expected to be inconclusive
+unless the difference is very close to 0. Cost per method is reported.
+
+---
+
+## What the results can and cannot say
+
+- Exp 1A isolates the reader: it says nothing about retrieval quality on its own. Exp 1B
+  combines it with one retriever on a closed corpus; the best k is specific to them.
+- Exp 1C explains mechanisms in a model we control. It does not predict Qwen's numbers.
+- Qwen attention results are correlational.
+- One generator, one retriever, closed corpus; IRCoT is a simplified, zero-shot version.
 
 ---
 
@@ -184,3 +177,10 @@ accounting for location).
   power-based sample size instead of fixed sample sizes, the nested-prefix Exp 1 design,
   condition-stratified AUROC for Exp 2, and the midpoint-matched Exp 3 layout.
   **No data had been downloaded or run when this change was made.**
+- **2026-10-12 (second change):** Redesigned again, still before any data was downloaded or run, to
+  the two experiments above: Exp 1 separates the model's ability to read long prompts
+  (single-hop NQ, gold always present, related vs unrelated distractors) from retrieval,
+  combines the two to choose a prompt length by accuracy per token, and adds a tiny GPT
+  trained from scratch to test mechanisms by intervention; Exp 2 restores the
+  single-shot vs CoT vs IRCoT comparison on MuSiQue and NQ. The gold-pair separation
+  experiment, the pilot and the power analysis were dropped; samples fixed at 200 + 200.

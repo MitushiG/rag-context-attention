@@ -1,14 +1,18 @@
-"""Context builders for Exp 1 (ranked expansion) and Exp 3 (evidence-pair placement).
+"""Context builders for Exp 1 (length x distractor type x gold position) and for top-k RAG.
 
-All builders are deterministic, so Exp 2 can rebuild exactly the contexts the model saw.
+All builders are deterministic, so the attention probe can rebuild exactly the contexts
+the model saw (it actually re-reads them from the saved ``context_ids``).
 """
 from __future__ import annotations
 
 import random
-from typing import Callable
+from typing import Callable, Iterable, Iterator
 
 from .corpus import labelled
+from .metrics import answer_in_text
 from .pipelines import format_passage
+
+POSITIONS = ("start", "middle", "end")
 
 
 def golds(ex: dict) -> list[dict]:
@@ -16,73 +20,79 @@ def golds(ex: dict) -> list[dict]:
     return sorted(g, key=lambda p: p["hop"])
 
 
-def own_distractors(ex: dict) -> list[dict]:
-    return [p for p in ex["passages"] if not p["is_gold"]]
+class TokenCounter:
+    """Caches the token cost of each passage as one formatted document."""
+
+    def __init__(self, count_tokens: Callable[[str], int]):
+        self.count_tokens = count_tokens
+        self._cache: dict[str, int] = {}
+
+    def __call__(self, p: dict) -> int:
+        if p["doc_id"] not in self._cache:
+            # "Document [10]" stands in for any index; + 2 for the blank line between documents
+            self._cache[p["doc_id"]] = self.count_tokens(format_passage(10, p)) + 2
+        return self._cache[p["doc_id"]]
 
 
 # --------------------------------------------------------------------------- Exp 1
 
-def ranked_context(ex: dict, ranked_ids: list[str], docs: dict, budget_tokens: int | None,
-                   count_tokens: Callable[[str], int], k: int | None = None) -> list[dict]:
-    """The retriever's ranked list, cut either at ``k`` passages (RAG) or at the longest
-    prefix that fits in ``budget_tokens`` (expanded context).
+def distractors(ex: dict, kind: str, ranked_ids: list[str], all_ids: list[str], docs: dict,
+                seed: int = 13) -> Iterator[dict]:
+    """Distractors for question ``ex`` in the order they are added to the context.
 
-    Because every context is a *prefix* of the same ranking, a longer budget only ever
-    adds lower-ranked passages: RAG ⊂ 4K ⊂ 12K ⊂ 28K for every question.
+    related:   the retriever's ranking for this question, most similar first.
+    unrelated: the whole corpus in a random (seeded, per-question) order.
+
+    Both skip the gold passage and any passage that contains an answer string, so the
+    gold passage is the only place the answer appears.
     """
-    if k is not None:
-        return [labelled(ex, docs[d]) for d in ranked_ids[:k]]
-    ctx, total = [], 0
-    for i, d in enumerate(ranked_ids, start=1):
-        p = labelled(ex, docs[d])
-        cost = count_tokens(format_passage(i, p)) + 2  # + the blank line between documents
-        if total + cost > budget_tokens:
-            break
-        ctx.append(p)
-        total += cost
+    gold = set(ex["gold_ids"])
+    if kind == "related":
+        order: Iterable[str] = ranked_ids
+    elif kind == "unrelated":
+        order = list(all_ids)
+        random.Random(f"{seed}-{ex['qid']}-unrelated").shuffle(order)
     else:
-        raise ValueError(f"ranking too short to fill {budget_tokens} tokens; retrieve more")
-    return ctx
+        raise ValueError(kind)
+    for d in order:
+        if d in gold:
+            continue
+        p = docs[d]
+        if answer_in_text(p["title"] + " " + p["text"], ex["answers"]):
+            continue
+        yield labelled(ex, p)
 
 
-# --------------------------------------------------------------------------- Exp 3
+def length_context(ex: dict, distractor_iter: Iterable[dict], budget_tokens: int | None,
+                   position: str, cost: TokenCounter, seed: int = 13) -> list[dict]:
+    """The gold passage plus distractors, taken in order while the total fits in
+    ``budget_tokens`` (None = gold only). The chosen distractors are shuffled (seeded),
+    then the gold passage is put at the start, the middle or the end.
 
-N_PASSAGES = 20
-# Midpoint of the gold pair (1-indexed slots) and number of distractors between the two
-# gold passages. Close and far pairs share a midpoint, so location and separation vary
-# independently:
-#   early:  close (5, 6)    far (1, 10)
-#   middle: close (10, 11)  far (6, 15)
-#   late:   close (15, 16)  far (11, 20)
-LOCATIONS = {"early": 5.5, "middle": 10.5, "late": 15.5}
-SEPARATIONS = {"close": 0, "far": 8}
-
-
-def pair_slots(location: str, separation: str) -> tuple[int, int]:
-    mid, between = LOCATIONS[location], SEPARATIONS[separation]
-    half = (between + 1) / 2
-    return int(mid - half), int(mid + half)
-
-
-def pair_context(ex: dict, location: str, separation: str, seed: int = 13) -> list[dict]:
-    """20 passages: the question's 18 own distractors in a fixed (seeded) order, with the
-    two gold passages inserted at ``pair_slots(location, separation)``.
-
-    Across the six conditions only the two gold slots change: same passages, same
-    distractor order, same total length. Which hop comes first is drawn once per
-    question (seeded) and kept across conditions; it is recorded as a covariate.
+    For a fixed question and distractor type, the distractor *set* at a shorter budget is
+    a subset of the set at a longer budget, so a longer budget only adds passages.
     """
-    rng = random.Random(f"{seed}-{ex['qid']}-pair")
-    g = golds(ex)
-    assert len(g) == 2, "pair_context needs exactly two gold passages"
-    dis = own_distractors(ex)
-    rng.shuffle(dis)
-    if len(dis) < N_PASSAGES - 2:
-        raise ValueError(f"{ex['qid']}: needs {N_PASSAGES - 2} distractors, has {len(dis)}")
-    dis = dis[: N_PASSAGES - 2]
-    first, second = g if rng.random() < 0.5 else g[::-1]
-    a, b = pair_slots(location, separation)
-    ctx = list(dis)
-    ctx.insert(a - 1, first)
-    ctx.insert(b - 1, second)
-    return ctx
+    gold = golds(ex)
+    assert len(gold) == 1, "length_context is for single-gold (NQ) questions"
+    gold = gold[0]
+    chosen: list[dict] = []
+    if budget_tokens is not None:
+        total = cost(gold)
+        for p in distractor_iter:
+            c = cost(p)
+            if total + c > budget_tokens:
+                break
+            chosen.append(p)
+            total += c
+        else:
+            raise ValueError(f"{ex['qid']}: ran out of distractors before {budget_tokens} tokens")
+        random.Random(f"{seed}-{ex['qid']}-{budget_tokens}").shuffle(chosen)
+    at = {"start": 0, "middle": len(chosen) // 2, "end": len(chosen)}[position]
+    return chosen[:at] + [gold] + chosen[at:]
+
+
+# --------------------------------------------------------------------------- RAG
+
+def topk_context(ex: dict, ranked_ids: list[str], docs: dict, k: int) -> list[dict]:
+    """The retriever's top ``k`` passages, in rank order."""
+    return [labelled(ex, docs[d]) for d in ranked_ids[:k]]

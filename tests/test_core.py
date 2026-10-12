@@ -1,10 +1,11 @@
-"""CPU-only tests for metrics, statistics, context builders and the attention probe."""
+"""CPU-only tests for metrics, statistics, context builders, pipelines, the attention probe
+and the tiny recall model."""
 import numpy as np
 import pandas as pd
 import pytest
 
 from hla import stats
-from hla.contexts import LOCATIONS, SEPARATIONS, pair_context, pair_slots, ranked_context
+from hla.contexts import TokenCounter, distractors, length_context
 from hla.corpus import build_corpus
 from hla.metrics import exact_match, f1_score
 
@@ -90,64 +91,118 @@ def test_clustered_logit_recovers_sign():
 
 # --------------------------------------------------------------------------- contexts
 
-def _example(qid, n_dis=18):
-    ps = [{"title": f"{qid}-g{h}", "text": "gold " * 20, "is_gold": True, "hop": h} for h in (1, 2)]
-    ps += [{"title": f"{qid}-d{i}", "text": "dis " * 20, "is_gold": False, "hop": None} for i in range(n_dis)]
-    return {"qid": qid, "question": "q?", "answers": ["a"], "passages": ps}
+def _example(qid, n_dis=19, answer="zebra"):
+    ps = [{"title": f"{qid}-gold", "text": f"the answer is {answer} " * 5, "is_gold": True, "hop": 1}]
+    ps += [{"title": f"{qid}-d{i}", "text": f"filler text number {i} " * 5, "is_gold": False, "hop": None}
+           for i in range(n_dis)]
+    return {"qid": qid, "dataset": "nq", "question": "q?", "answers": [answer], "passages": ps}
 
 
 @pytest.fixture
 def built():
-    corpus, exs = build_corpus([_example(f"q{i}") for i in range(30)])
+    exs = [_example(f"q{i}") for i in range(30)]
+    exs[5]["passages"][3]["text"] = "this distractor mentions zebra"  # contains the answer
+    corpus, exs = build_corpus(exs)
     return corpus, {e["qid"]: e for e in exs}
 
 
-def test_corpus_ids_and_gold_order(built):
+def test_corpus_ids_and_gold(built):
     corpus, exs = built
-    assert len(corpus) == 30 * 20
-    ex = exs["q1"]
-    assert [ex["gold_hops"][d] for d in ex["gold_ids"]] == [1, 2]
+    assert len(corpus) == 30 * 20  # titles differ, so no passages are merged
+    assert len(exs["q1"]["gold_ids"]) == 1
 
 
-def test_ranked_context_prefixes_are_nested(built):
+def _setup(built, qid="q1"):
     corpus, exs = built
     docs = {d["doc_id"]: d for d in corpus}
-    ex = exs["q3"]
-    ranked = [d["doc_id"] for d in corpus]
-    count = lambda s: len(s.split())
-    rag = ranked_context(ex, ranked, docs, None, count, k=5)
-    ctxs = [ranked_context(ex, ranked, docs, b, count) for b in (300, 900, 2700)]
-    assert [p["doc_id"] for p in rag] == ranked[:5]
-    for short, long in zip([rag] + ctxs, ctxs):
-        assert [p["doc_id"] for p in long[: len(short)]] == [p["doc_id"] for p in short]
-    for b, c in zip((300, 900, 2700), ctxs):
-        assert sum(count(f"Document [{i}] (Title: {p['title']}) {p['text']}") + 2
-                   for i, p in enumerate(c, start=1)) <= b
-    # gold labels are relative to the question
-    assert sum(p["is_gold"] for p in ctxs[-1]) == sum(d in ex["gold_hops"] for d in ranked[: len(ctxs[-1])])
+    return exs[qid], docs, list(docs), TokenCounter(lambda s: len(s.split()))
+
+
+@pytest.mark.parametrize("kind", ["related", "unrelated"])
+def test_distractors_exclude_gold_and_answer(built, kind):
+    ex, docs, all_ids, _ = _setup(built)
+    ds = list(distractors(ex, kind, all_ids, all_ids, docs))
+    assert all(not p["is_gold"] for p in ds)
+    assert all("zebra" not in p["text"] for p in ds)
+    assert len(ds) < len(all_ids)
+
+
+@pytest.mark.parametrize("kind", ["related", "unrelated"])
+def test_length_context_nested_and_positioned(built, kind):
+    ex, docs, all_ids, cost = _setup(built)
+    sets = []
+    for budget in (200, 800, 3000):
+        for pos, at in (("start", 0), ("middle", None), ("end", -1)):
+            ctx = length_context(ex, distractors(ex, kind, all_ids, all_ids, docs), budget, pos, cost)
+            gi = [i for i, p in enumerate(ctx) if p["is_gold"]]
+            assert len(gi) == 1
+            assert gi[0] == ((len(ctx) - 1) // 2 if pos == "middle" else range(len(ctx))[at])
+            assert sum(cost(p) for p in ctx) <= budget
+        sets.append({p["doc_id"] for p in ctx})
+    assert sets[0] <= sets[1] <= sets[2]  # a longer budget only adds passages
+    assert len(length_context(ex, [], None, "start", cost)) == 1
+
+
+def test_length_context_runs_out(built):
+    ex, docs, all_ids, cost = _setup(built)
     with pytest.raises(ValueError):
-        ranked_context(ex, ranked[:10], docs, 10**6, count)
+        length_context(ex, distractors(ex, "related", all_ids[:5], all_ids, docs), 10**6, "start", cost)
 
 
-def test_pair_slots_share_midpoints():
-    for loc, mid in LOCATIONS.items():
-        for sep, between in SEPARATIONS.items():
-            a, b = pair_slots(loc, sep)
-            assert (a + b) / 2 == mid and b - a - 1 == between and 1 <= a < b <= 20
+# --------------------------------------------------------------------------- pipelines
+
+class FakeGen:
+    """Stands in for vLLM: scripted outputs, counts calls."""
+
+    def __init__(self, script):
+        self.script, self.calls = script, 0
+
+    def chat_prompt(self, body):
+        return body
+
+    def count_tokens(self, text):
+        return len(text.split())
+
+    def generate(self, prompts, max_tokens=32, stop=None):
+        from hla.generation import Generation
+        self.calls += len(prompts)
+        return [Generation(text=self.script(p), mean_logprob=-0.1, n_tokens=3) for p in prompts]
 
 
-def test_pair_context_only_moves_the_golds(built):
-    _, exs = built
-    ex = exs["q7"]
-    seen = []
-    for loc in LOCATIONS:
-        for sep in SEPARATIONS:
-            ctx = pair_context(ex, loc, sep)
-            a, b = pair_slots(loc, sep)
-            assert len(ctx) == 20 and [i + 1 for i, p in enumerate(ctx) if p["is_gold"]] == [a, b]
-            seen.append(([p["doc_id"] for p in ctx if not p["is_gold"]],
-                         [p["hop"] for p in ctx if p["is_gold"]]))
-    assert all(s == seen[0] for s in seen)  # same distractor order and hop order everywhere
+class FakeRetriever:
+    def __init__(self, table):
+        self.table = table
+
+    def search(self, queries, k=10):
+        return [self.table.get(q, self.table["default"])[:k] for q in queries]
+
+
+def test_ircot_retrieves_with_reasoning_and_tracks_golds():
+    docs = {d: {"doc_id": d, "title": d, "text": d} for d in ["a", "b", "c", "hop2", "x", "y"]}
+    ex = {"qid": "m1", "question": "Who is the spouse of the director of Titanic?", "answers": ["Suzy Amis"],
+          "gold_ids": ["a", "hop2"], "dataset": "musique"}
+    retr = FakeRetriever({ex["question"]: ["a", "b", "c"], "Titanic was directed by James Cameron.": ["hop2", "x"],
+                          "default": ["y"]})
+
+    def script(prompt):
+        if "Reasoning so far: (none)" in prompt:
+            return "Titanic was directed by James Cameron."
+        return "Cameron is married to Suzy Amis. So the answer is: Suzy Amis."
+
+    from hla.pipelines import ircot
+    r = ircot(FakeGen(script), retr, docs, [ex], k_init=3, k_step=1)[0]
+    assert r["pred"] == "Suzy Amis" and not r["fallback"]
+    assert r["context_ids"] == ["a", "b", "c", "hop2"]
+    assert r["found_by_step"] == [[True, False], [True, True], [True, True]]
+    assert r["llm_calls"] == 2
+
+
+def test_cot_falls_back_when_no_answer_stated():
+    from hla.pipelines import single_shot_cot
+    ctx = [{"doc_id": "a", "title": "a", "text": "a"}]
+    gen = FakeGen(lambda p: "Paris" if p.startswith("Answer the question. Respond") else "I am not sure.")
+    r = single_shot_cot(gen, [{"qid": "n1", "question": "q?"}], [ctx])[0]
+    assert r["pred"] == "Paris" and r["fallback"] and r["llm_calls"] == 2
 
 
 # --------------------------------------------------------------------------- attention probe
@@ -168,3 +223,48 @@ def test_attention_probe_matches_eager():
     assert att.shape == (3, 60)
     assert np.allclose(att.sum(axis=1), 1, atol=1e-5)
     assert np.all(att[:, 57:] == 0)  # causal: answer rows never see later positions
+
+
+# --------------------------------------------------------------------------- tiny recall model
+
+def test_tiny_recall_batch_and_model():
+    torch = pytest.importorskip("torch")
+    import importlib.util
+    import pathlib
+
+    spec = importlib.util.spec_from_file_location(
+        "tiny_recall", pathlib.Path(__file__).parents[1] / "foundations" / "tiny_recall.py")
+    t = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(t)
+
+    gen = torch.Generator().manual_seed(0)
+    nf = 20
+    for kind in ("related", "unrelated"):
+        x, y, needle, qpos = t.make_batch(8, nf, kind, gen)
+        assert x.shape == (8, nf * t.FACT + t.QUERY_BLOCK)
+        assert qpos[-1].item() == x.shape[1] - 1                    # final query ends the sequence
+        for i in range(8):
+            facts = x[i, : nf * t.FACT].view(nf, t.FACT)
+            assert len(set(needle[i].tolist())) == t.N_QUERIES       # distinct queried keys
+            for j in range(t.N_QUERIES):
+                p = qpos[j].item()
+                assert x[i, p - t.KEY_LEN].item() == t.QUERY
+                q = x[i, p - t.KEY_LEN + 1: p + 1]
+                match = (facts[:, : t.KEY_LEN] == q).all(1).nonzero().flatten().tolist()
+                assert match == [needle[i, j].item()]                # query key appears once
+                assert facts[needle[i, j], -1].item() == y[i, j].item()  # answer = its value
+                if j < t.N_QUERIES - 1:
+                    assert x[i, p + 1].item() == y[i, j].item()          # earlier answers are shown
+            if kind == "related":
+                assert (facts[:, 0] == facts[0, 0]).all()            # shared first symbol
+
+    for variant, (pos, ssmax) in t.VARIANTS.items():
+        m = t.TinyGPT(pos=pos, ssmax=ssmax, d=32, n_layer=2)
+        logits, rows = m(x, keep_attention=True)
+        assert logits.shape == (8, x.shape[1], t.VOCAB) and len(rows) == 2
+        assert torch.allclose(rows[0].sum(-1), torch.ones(8), atol=1e-5)
+
+    # log-n scaling is the identity inside the training length
+    m = t.TinyGPT(pos="rope", d=32, n_layer=2).eval()
+    x = t.make_batch(4, t.N_TRAIN, "unrelated", gen)[0]
+    assert torch.allclose(m(x)[0], m(x, logn=True)[0], atol=1e-5)
