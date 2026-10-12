@@ -1,7 +1,6 @@
 # Pre-registration: Context, Position and Attention in Retrieval-Augmented LLMs
 
-This file is committed **before any experiment is run**. Its git commit timestamp is the
-pre-registration record. Any later change to a hypothesis, metric, sample or test goes in
+Any later change to a hypothesis, metric, sample or test goes in
 the **Amendments** section at the bottom, with a date and a reason. Earlier text is never
 edited silently.
 
