@@ -266,6 +266,9 @@ def main():
     if args.sweep:
         for variant in VARIANTS:
             for seed in (0, 1, 2):
+                if Path(f"results/tiny/{variant}_s{seed}.json").exists():
+                    print(f"{variant} seed {seed}: done, skipping")
+                    continue
                 run(variant, seed, args.steps, device)
     else:
         variant = "rope_ssmax" if args.ssmax else args.pos

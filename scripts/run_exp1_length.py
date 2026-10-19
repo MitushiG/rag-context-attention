@@ -21,7 +21,8 @@ from hla.contexts import POSITIONS, TokenCounter, distractors, length_context, t
 from hla.generation import Generator
 from hla.pipelines import answer_with_contexts, format_passages
 from hla.retrieval import DenseRetriever
-from hla.runtime import load_corpus, load_examples, save, score
+from hla.data import read_jsonl, write_jsonl
+from hla.runtime import RESULTS, load_corpus, load_examples, save, score
 
 # 30K leaves room for the instruction, question and answer in the 32,768-token window.
 LENGTHS = {"2K": 2_000, "8K": 8_000, "16K": 16_000, "30K": 30_000}
@@ -78,17 +79,28 @@ def main():
     for k in RAG_K:
         conds[f"rag_k{k}"] = ({"k": k}, [topk_context(e, r, docs, k) for e, r in zip(examples, ranked)])
 
+    # Each condition is saved as it finishes, so a disconnected Colab session resumes
+    # where it stopped. --limit runs write to a separate folder.
+    part_dir = RESULTS / "exp1" / ("parts" if args.limit is None else f"parts_limit{args.limit}")
     rows = []
     for cond, (meta, ctxs) in conds.items():
+        part = part_dir / f"{cond}.jsonl"
+        if part.exists():
+            rows += read_jsonl(part)
+            print(f"{cond:24s} (done, loaded)")
+            continue
         recs = score(answer_with_contexts(gen, examples, ctxs), examples)
+        cond_rows = []
         for ctx, r in zip(ctxs, recs):
             gold_at = [i for i, p in enumerate(ctx or [], start=1) if p["is_gold"]]
-            rows.append({
+            cond_rows.append({
                 **r, "condition": cond, **meta,
                 "context_tokens": gen.count_tokens(format_passages(ctx)) if ctx else 0,
                 "n_passages": len(ctx or []),
                 "gold_in_context": bool(gold_at), "gold_index": gold_at[0] if gold_at else None,
             })
+        write_jsonl(cond_rows, part)
+        rows += cond_rows
         print(f"{cond:24s} EM {sum(r['em'] for r in recs) / len(recs):.3f}")
     save(rows, "exp1", "exp1.jsonl")
 

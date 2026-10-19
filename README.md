@@ -64,6 +64,9 @@ tests/                       CPU unit tests
 
 ## Running
 
+On Colab, open [`notebooks/run_on_colab.ipynb`](notebooks/run_on_colab.ipynb): it runs everything below in order,
+saves to Google Drive and resumes after a disconnect.
+
 `analyze.py` and the tests run on CPU. `tiny_recall.py` needs only a T4. Everything else
 needs a large GPU: an A100 is recommended for the 30K-token runs.
 
