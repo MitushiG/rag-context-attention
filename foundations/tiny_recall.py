@@ -262,7 +262,7 @@ def main():
     ap.add_argument("--steps", type=int, default=8000)
     ap.add_argument("--sweep", action="store_true", help="all 4 variants x seeds 0, 1, 2")
     args = ap.parse_args()
-    device = "cuda" if torch.cuda.is_available() else "cpu"
+    device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
     if args.sweep:
         for variant in VARIANTS:
             for seed in (0, 1, 2):
