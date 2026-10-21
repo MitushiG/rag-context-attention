@@ -180,13 +180,18 @@ class TinyGPT(nn.Module):
 # --------------------------------------------------------------------------- train / eval
 
 
-def train(model, steps, device, seed, batch=64, lr=1e-3, max_facts=N_TRAIN, min_facts=N_QUERIES):
+def train(model, steps, device, seed, batch=64, lr=1e-3, max_facts=N_TRAIN, min_facts=N_QUERIES,
+          curriculum=0.0):
+    """curriculum: fraction of training over which the largest N grows linearly from
+    min_facts to max_facts (0 = draw from the full range from the start)."""
     gen = torch.Generator().manual_seed(seed)
     opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=0.1)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=lr, total_steps=steps, pct_start=0.05)
     curve = []
     for step in range(steps):
-        n = int(torch.randint(min_facts, max_facts + 1, (1,), generator=gen))
+        hi = max_facts if curriculum <= 0 else \
+            min(max_facts, min_facts + round((max_facts - min_facts) * step / (curriculum * steps)))
+        n = int(torch.randint(min_facts, hi + 1, (1,), generator=gen))
         x, y, _, qpos = make_batch(batch, n, "mixed", gen, device)
         logits = model(x)[0][:, qpos]                                  # [B, Q, VOCAB]
         loss = F.cross_entropy(logits.reshape(-1, VOCAB), y.reshape(-1))
@@ -237,18 +242,19 @@ VARIANTS = {"rope": ("rope", False), "learned": ("learned", False), "none": ("no
             "rope_ssmax": ("rope", True)}
 
 
-def run(variant, seed, steps, device, out_dir=Path("results/tiny")):
+def run(variant, seed, steps, device, out_dir=Path("results/tiny"), lr=1e-3, curriculum=0.0, do_eval=True):
     pos, ssmax = VARIANTS[variant]
     torch.manual_seed(seed)
     model = TinyGPT(pos=pos, ssmax=ssmax).to(device)
     print(f"{variant} seed {seed}: {sum(p.numel() for p in model.parameters()) / 1e6:.2f}M params")
     t0 = time.time()
-    curve = train(model, steps, device, seed)
+    curve = train(model, steps, device, seed, lr=lr, curriculum=curriculum)
     if curve[-1]["acc"] < 0.95:
         print(f"  WARNING: final training accuracy {curve[-1]['acc']:.2f} < 0.95; the model has not "
               "learned the task at the training length. Rerun with more --steps before comparing variants.")
-    res = {"variant": variant, "seed": seed, "steps": steps, "train_curve": curve,
-           "eval": evaluate(model, device), "minutes": round((time.time() - t0) / 60, 2)}
+    res = {"variant": variant, "seed": seed, "steps": steps, "lr": lr, "curriculum": curriculum,
+           "train_curve": curve,
+           "eval": evaluate(model, device) if do_eval else None, "minutes": round((time.time() - t0) / 60, 2)}
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / f"{variant}_s{seed}.json").write_text(json.dumps(res))
     return res
@@ -260,21 +266,27 @@ def main():
     ap.add_argument("--ssmax", action="store_true")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--steps", type=int, default=8000)
+    ap.add_argument("--lr", type=float, default=1e-3)
+    ap.add_argument("--curriculum", type=float, default=0.0,
+                    help="fraction of training over which max N grows from 8 to 64")
+    ap.add_argument("--out", default="results/tiny", help="use e.g. results/tiny_pilot for tuning runs")
+    ap.add_argument("--no-eval", action="store_true", help="train only (for tuning)")
     ap.add_argument("--sweep", action="store_true", help="all 4 variants x seeds 0, 1, 2")
     args = ap.parse_args()
+    out = Path(args.out)
     device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
     if args.sweep:
         for variant in VARIANTS:
             for seed in (0, 1, 2):
-                if Path(f"results/tiny/{variant}_s{seed}.json").exists():
+                if (out / f"{variant}_s{seed}.json").exists():
                     print(f"{variant} seed {seed}: done, skipping")
                     continue
-                run(variant, seed, args.steps, device)
+                run(variant, seed, args.steps, device, out, args.lr, args.curriculum, not args.no_eval)
     else:
         variant = "rope_ssmax" if args.ssmax else args.pos
         if args.ssmax and args.pos != "rope":
             raise SystemExit("--ssmax is defined on top of --pos rope")
-        run(variant, args.seed, args.steps, device)
+        run(variant, args.seed, args.steps, device, out, args.lr, args.curriculum, not args.no_eval)
 
 
 if __name__ == "__main__":
