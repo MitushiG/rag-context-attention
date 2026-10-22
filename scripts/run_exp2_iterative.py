@@ -54,7 +54,7 @@ def main():
                          "golds_found": [g in r["context_ids"] for g in gold]})
         for ds in ("musique", "nq"):
             sub = [r for r in rows if r["method"] == method and r["dataset"] == ds]
-            print(f"{method:10s} {ds:8s} EM {sum(r['em'] for r in sub) / max(1, len(sub)):.3f}  "
+            print(f"{method:10s} {ds:8s} acc {sum(r['acc'] for r in sub) / max(1, len(sub)):.3f}  "
                   f"calls {sum(r['llm_calls'] for r in sub) / max(1, len(sub)):.2f}")
     save(rows, "exp2", "exp2.jsonl")
 

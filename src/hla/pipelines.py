@@ -39,7 +39,7 @@ def _clean(ans: str) -> str:
 def answer_with_contexts(gen: Generator, examples: list[dict], contexts: list[list[dict] | None]) -> list[dict]:
     """One LLM call per question with a fixed context (None = closed-book)."""
     prompts = [gen.chat_prompt(qa_body(ex["question"], ctx)) for ex, ctx in zip(examples, contexts)]
-    outs = gen.generate(prompts, max_tokens=32, stop=["\n"])
+    outs = gen.generate(prompts, max_tokens=64, stop=["\n"])
     return [
         {
             "qid": ex["qid"], "pred": _clean(o.text), "mean_logprob": o.mean_logprob,

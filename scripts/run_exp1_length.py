@@ -103,7 +103,7 @@ def main():
             })
         write_jsonl(cond_rows, part)
         rows += cond_rows
-        print(f"{cond:24s} EM {sum(r['em'] for r in recs) / len(recs):.3f}")
+        print(f"{cond:24s} acc {sum(r['acc'] for r in recs) / len(recs):.3f}  EM {sum(r['em'] for r in recs) / len(recs):.3f}")
     save(rows, "exp1", "exp1.jsonl")
 
 

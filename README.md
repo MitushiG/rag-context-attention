@@ -23,7 +23,7 @@ The full pre-registration is in [`HYPOTHESES.md`](HYPOTHESES.md).
 | | What | Main test |
 |---|---|---|
 | **1A** | 200 NQ questions, gold passage always present; length 2K–30K × related vs unrelated distractors × gold at start / middle / end | H1: accuracy falls with log2(length), clustered logistic regression |
-| **1B** | retriever recall@k × reader accuracy at the length of k passages → predicted RAG accuracy(k); checked with real top-k RAG | best k = shortest prompt within 1 EM point of the best |
+| **1B** | retriever recall@k × reader accuracy at the length of k passages → predicted RAG accuracy(k); checked with real top-k RAG | best k = shortest prompt within 1 accuracy point of the best |
 | **1 attn** | attention share on the gold passage (100 questions, all 1A conditions) | H2: condition-stratified AUROC for correctness > 0.5 |
 | **1C** | tiny GPT on a synthetic key→value lookup; RoPE vs learned vs no positions vs learned length-aware scaling; inference-time log-n scaling on the same weights; fine-tuning on longer inputs vs an equal-length control | H3: descriptive, 3 seeds |
 | **2** | 200 MuSiQue 2-hop + 200 NQ; single-shot / single-shot + CoT / IRCoT / oracle | H4: IRCoT > single-shot on MuSiQue (McNemar); H6: gain smaller on NQ (interaction) |

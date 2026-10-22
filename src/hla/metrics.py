@@ -43,6 +43,13 @@ def f1_score(pred: str, golds: Sequence[str]) -> float:
     return max((_f1(pred, g) for g in golds), default=0.0)
 
 
+def answer_accuracy(pred: str, golds: Sequence[str]) -> float:
+    """Primary metric: 1 if any accepted answer appears in the normalized prediction
+    (the accuracy of Liu et al., 2023, on this NQ release). Unlike EM it does not count
+    a correct answer wrapped in a sentence as wrong."""
+    return float(answer_in_text(pred, golds))
+
+
 def answer_in_text(text: str, golds: Sequence[str]) -> bool:
     """Loose match used for 'does this passage contain the answer' checks."""
     t = normalize_answer(text)

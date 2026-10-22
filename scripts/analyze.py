@@ -39,28 +39,28 @@ def load(*parts) -> pd.DataFrame | None:
 def exp1a(df):
     out("## Exp 1A: accuracy vs prompt length, gold passage always present\n")
     ref = df[df.condition.isin(["closed_book", "gold_only", "nogold_related_2K"])]
-    out(ref.groupby("condition")[["em", "context_tokens"]].mean().round(3).to_markdown())
+    out(ref.groupby("condition")[["acc", "em", "context_tokens"]].mean().round(3).to_markdown())
     out()
     grid = df[df.length.isin(LENGTH_ORDER) & df.gold_in_context].copy()
     grid["log2_tokens"] = np.log2(grid.context_tokens)
     for kind, g in grid.groupby("kind"):
         out(f"EM, {kind} distractors (rows: length, columns: gold position):\n")
-        out(g.pivot_table(index="length", columns="position", values="em")
+        out(g.pivot_table(index="length", columns="position", values="acc")
             .reindex(index=LENGTH_ORDER, columns=["start", "middle", "end"]).round(3).to_markdown())
         out()
 
-    res = stats.logit_clustered("em ~ log2_tokens + C(kind) + C(position)", grid, "qid")
+    res = stats.logit_clustered("acc ~ log2_tokens + C(kind) + C(position)", grid, "qid")
     p = stats.one_sided_p(res, "log2_tokens", "<")
     primary_p["H1"] = p
     out(f"**H1 (primary).** logit coefficient on log2(context tokens) = {res.params['log2_tokens']:.3f} "
         f"(SE {res.bse['log2_tokens']:.3f}; each doubling multiplies the odds of a correct answer by "
         f"{np.exp(res.params['log2_tokens']):.2f}), one-sided p = {p:.3g}\n")
 
-    r2 = stats.logit_clustered("em ~ log2_tokens * C(kind) + C(position)", grid, "qid")
+    r2 = stats.logit_clustered("acc ~ log2_tokens * C(kind) + C(position)", grid, "qid")
     t = "log2_tokens:C(kind)[T.unrelated]"
     out(f"- length × distractor type: {r2.params[t]:.3f} (p = {r2.pvalues[t]:.3g}); "
         f"> 0 means unrelated text hurts less than related text")
-    wide = df.pivot_table(index="qid", columns="condition", values="em")
+    wide = df.pivot_table(index="qid", columns="condition", values="acc")
     for kind in ("related", "unrelated"):
         long_ = wide[[f"{kind}_30K_{p}" for p in ("start", "middle", "end")]].mean(axis=1)
         d = stats.paired_bootstrap_diff(wide["gold_only"], long_)
@@ -73,11 +73,11 @@ def exp1a(df):
 def _reader_curve(df):
     """EM vs log2(tokens): gold only, then related distractors averaged over positions."""
     g = df[df.condition == "gold_only"]
-    pts = [(np.log2(max(g.context_tokens.mean(), 1)), g.em.mean())]
+    pts = [(np.log2(max(g.context_tokens.mean(), 1)), g.acc.mean())]
     rel = df[(df.kind == "related") & df.length.isin(LENGTH_ORDER) & df.gold_in_context]
     for L in LENGTH_ORDER:
         s = rel[rel.length == L]
-        pts.append((np.log2(s.context_tokens.mean()), s.em.mean()))
+        pts.append((np.log2(s.context_tokens.mean()), s.acc.mean()))
     x, y = map(np.array, zip(*sorted(pts)))
     return x, y
 
@@ -87,7 +87,7 @@ def predicted_curve(df, rk, ks):
     x, y = _reader_curve(df)
     rag = df[df.condition.str.startswith("rag")]
     tok_per_passage = rag.context_tokens.sum() / rag.n_passages.sum()
-    a0 = df[df.condition == "nogold_related_2K"].em.mean()
+    a0 = df[df.condition == "nogold_related_2K"].acc.mean()
     ranks = rk.gold_rank.to_numpy(dtype=float)
     R = np.array([np.mean(np.nan_to_num(ranks, nan=np.inf) <= k) for k in ks])
     L = ks * tok_per_passage
@@ -120,7 +120,7 @@ def exp1b(df, rk):
 
     out("| k | tokens | retriever recall | predicted EM | observed EM | EM per 1K tokens (predicted) |")
     out("|---|---|---|---|---|---|")
-    obs = {int(c[5:]): g.em for c, g in df[df.condition.str.startswith("rag_k")].groupby("condition")}
+    obs = {int(c[5:]): g.acc for c, g in df[df.condition.str.startswith("rag_k")].groupby("condition")}
     for k in sorted(set([1, 2, 3, 5, 10, 20, 50, 100, 200, k_star])):
         o = obs.get(k)
         o_s = f"{o.mean():.3f}" if o is not None else ""
@@ -136,13 +136,13 @@ def exp1b(df, rk):
 
 def exp1_attention(att):
     out("## Exp 1: attention on the gold passage\n")
-    est = stats.cluster_bootstrap(att, "qid", lambda d: stats.stratified_auroc(d.gold_share, d.em, d.condition), null=0.5)
+    est = stats.cluster_bootstrap(att, "qid", lambda d: stats.stratified_auroc(d.gold_share, d.acc, d.condition), null=0.5)
     p = stats.one_sided_from_two(est, 0.5, ">")
     primary_p["H2"] = p
     out(f"**H2 (primary).** Condition-stratified AUROC of gold attention share for correctness "
         f"({len(att)} rows, {att.qid.nunique()} questions): {est.value:.3f} "
         f"[{est.ci_low:.3f}, {est.ci_high:.3f}], one-sided p = {fmt_p(p)}\n")
-    g = att.groupby(["kind", "length"])[["gold_share", "gold_length_share", "em"]].mean()
+    g = att.groupby(["kind", "length"])[["gold_share", "gold_length_share", "acc"]].mean()
     out(g.round(4).to_markdown())
     out()
     a = att[att.length.isin(LENGTH_ORDER)].copy()
@@ -153,7 +153,7 @@ def exp1_attention(att):
     out(f"- log(gold share) per doubling of length: {ols.params['log2_tokens']:.3f} "
         f"(p = {ols.pvalues['log2_tokens']:.3g}); a slope of -1 would mean pure 1/n dilution")
     a["log_lift"] = np.log(a.gold_share / a.gold_length_share)
-    lift = stats.cluster_bootstrap(a, "qid", lambda d: stats.stratified_auroc(d.log_lift, d.em, d.condition), null=0.5)
+    lift = stats.cluster_bootstrap(a, "qid", lambda d: stats.stratified_auroc(d.log_lift, d.acc, d.condition), null=0.5)
     out(f"- robustness, length-adjusted share (log lift): stratified AUROC {lift}")
     out()
 
@@ -242,10 +242,10 @@ def exp1c_finetune(base: pd.DataFrame, dropped: set[str]):
 def exp2(df):
     out("## Exp 2: single-shot vs chain of thought vs iterative retrieval\n")
     df["all_golds"] = df.golds_found.apply(all)
-    out(df.groupby(["dataset", "method"])[["em", "f1", "all_golds", "llm_calls", "prompt_tokens", "fallback"]]
+    out(df.groupby(["dataset", "method"])[["acc", "em", "f1", "all_golds", "llm_calls", "prompt_tokens", "fallback"]]
         .mean().round(3).to_markdown())
     out()
-    mq = df[df.dataset == "musique"].pivot_table(index="qid", columns="method", values="em")
+    mq = df[df.dataset == "musique"].pivot_table(index="qid", columns="method", values="acc")
     t = stats.mcnemar_exact(mq["ircot"], mq["single"], alternative="greater")
     primary_p["H4"] = t["p_value"]
     out(f"**H4 (primary).** MuSiQue, IRCoT − single-shot = {t['diff']:+.3f} (IRCoT-only right "
@@ -270,12 +270,12 @@ def exp2(df):
     two = df[df.method.isin(["single", "ircot"])].copy()
     two["ircot"] = (two.method == "ircot").astype(int)
     two["nq"] = (two.dataset == "nq").astype(int)
-    r = stats.logit_clustered("em ~ ircot * nq", two, "qid")
+    r = stats.logit_clustered("acc ~ ircot * nq", two, "qid")
     p = stats.one_sided_p(r, "ircot:nq", "<")
     primary_p["H6"] = p
     out(f"\n**H6 (primary).** method × dataset interaction (IRCoT gain smaller on NQ): "
         f"{r.params['ircot:nq']:.3f} (SE {r.bse['ircot:nq']:.3f}), one-sided p = {p:.3g}")
-    nq = df[df.dataset == "nq"].pivot_table(index="qid", columns="method", values="em")
+    nq = df[df.dataset == "nq"].pivot_table(index="qid", columns="method", values="acc")
     d = stats.paired_bootstrap_diff(nq["ircot"], nq["single"])
     e90 = stats.bootstrap(lambda idx, a=(nq["ircot"] - nq["single"]).to_numpy(): float(a[idx].mean()),
                           len(nq), alpha=0.10)

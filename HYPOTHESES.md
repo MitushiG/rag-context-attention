@@ -28,7 +28,7 @@ marked *secondary* are reported as such.
 | Corpus | every passage of every NQ (release) and MuSiQue 2-hop dev question, de-duplicated (closed corpus) |
 | Generator | `Qwen/Qwen2.5-7B-Instruct`, greedy decoding, vLLM, 32K-token window |
 | Retriever | `intfloat/e5-base-v2` dense retrieval (the only retriever) |
-| Metric | exact match (EM) after SQuAD normalization, best over answer aliases; F1 secondary |
+| Metric | **accuracy**: 1 if any accepted answer appears in the prediction, after SQuAD normalization (the metric of Liu et al., 2023, on this NQ release); exact match (EM) and F1 secondary. Answers are capped at 64 tokens. EM alone was dropped as primary because a 5-question check showed the model answering in full sentences at 30K tokens, so EM would mix format compliance with finding the answer; the EM − accuracy gap by length is reported as a secondary measure of format compliance |
 
 Every question appears in several conditions, so all regressions use question-clustered
 robust standard errors and every bootstrap resamples whole questions.
@@ -51,26 +51,26 @@ closed-book, gold passage only, and related distractors at 2K **without** the go
 
 **H1 (primary).** Accuracy falls as the prompt gets longer.
 
-    logit P(EM) = β₀ + β₁ · log2(context tokens) + distractor type + gold position
+    logit P(correct) = β₀ + β₁ · log2(context tokens) + distractor type + gold position
 
 over the 24 length × type × position conditions. One-sided test of **β₁ < 0**.
 
 *Secondary:* length × distractor-type interaction (expected: related text hurts more);
-gold only vs 30K per distractor type (paired bootstrap); EM per 1K tokens.
+gold only vs 30K per distractor type (paired bootstrap); accuracy per 1K tokens; EM − accuracy gap by length.
 
 ## Exp 1B — The best RAG prompt length
 
 Combines the two curves measured separately:
 
 - **retriever curve** R(k): share of questions whose gold passage is in the top k;
-- **reader curve**: EM vs log2(tokens) from Exp 1A (gold only, then related
+- **reader curve**: accuracy vs log2(tokens) from Exp 1A (gold only, then related
   distractors averaged over positions), linearly interpolated;
-- **gold-absent accuracy** a₀: EM of the "related distractors at 2K, no gold" condition.
+- **gold-absent accuracy** a₀: accuracy of the "related distractors at 2K, no gold" condition.
 
-Predicted RAG EM(k) = R(k) · reader(tokens of k passages) + (1 − R(k)) · a₀, for
-k = 1 … 200. **Best length = the smallest k whose predicted EM is within 1 EM point of
+Predicted RAG accuracy(k) = R(k) · reader(tokens of k passages) + (1 − R(k)) · a₀, for
+k = 1 … 200. **Best length = the smallest k whose predicted accuracy is within 1 point of
 the maximum** (the most accuracy per token without giving up accuracy). 95% interval
-for the best k by question-level bootstrap. Predicted EM per 1K tokens is reported for
+for the best k by question-level bootstrap. Predicted accuracy per 1K tokens is reported for
 every k.
 
 *Check:* real top-k RAG at k = 1, 5, 20, 50 (rank order). The prediction is supported
@@ -154,7 +154,7 @@ seeds; not part of the Holm family.
 | oracle | gold passages only (reference) |
 
 If a chain of thought never states an answer, one direct-answer call over the same
-passages is made (recorded as `fallback`). For every method we record EM, which gold
+passages is made (recorded as `fallback`). For every method we record accuracy, EM, which gold
 passages ended up in context (for IRCoT, after every step), LLM calls and tokens.
 
 **H4 (primary).** On MuSiQue, IRCoT is more accurate than single-shot. One-sided exact
@@ -167,10 +167,10 @@ McNemar, two-sided), and the share of questions with both gold passages after ea
 
 **H6 (primary).** The IRCoT gain is smaller on NQ than on MuSiQue:
 
-    logit P(EM) = β₀ + β₁ · ircot + β₂ · nq + β₃ · ircot × nq   (single and ircot rows)
+    logit P(correct) = β₀ + β₁ · ircot + β₂ · nq + β₃ · ircot × nq   (single and ircot rows)
 
 One-sided test of **β₃ < 0**. *Secondary:* equivalence on NQ, 90% CI of (IRCoT −
-single) inside ±3 EM points; with 200 questions this is expected to be inconclusive
+single) inside ±3 accuracy points; with 200 questions this is expected to be inconclusive
 unless the difference is very close to 0. Cost per method is reported.
 
 ---

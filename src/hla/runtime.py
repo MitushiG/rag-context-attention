@@ -4,7 +4,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .data import read_jsonl, write_jsonl
-from .metrics import exact_match, f1_score
+from .metrics import answer_accuracy, exact_match, f1_score
 
 PROCESSED = Path("data/processed")
 SAMPLES = Path("data/samples")
@@ -23,10 +23,11 @@ def load_corpus() -> list[dict]:
 
 
 def score(records: list[dict], examples: list[dict]) -> list[dict]:
-    """Attach EM/F1 and the dataset name to pipeline outputs."""
+    """Attach accuracy (primary), EM, F1 and the dataset name to pipeline outputs."""
     by_id = {e["qid"]: e for e in examples}
     return [
         {**r, "dataset": by_id[r["qid"]]["dataset"],
+         "acc": answer_accuracy(r["pred"], by_id[r["qid"]]["answers"]),
          "em": exact_match(r["pred"], by_id[r["qid"]]["answers"]),
          "f1": f1_score(r["pred"], by_id[r["qid"]]["answers"])}
         for r in records

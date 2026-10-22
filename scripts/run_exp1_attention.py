@@ -58,7 +58,7 @@ def main():
             f.write(json.dumps({
                 "qid": r["qid"], "condition": r["condition"], "kind": r.get("kind"), "length": r.get("length"),
                 "position": r.get("position"), "context_tokens": r["context_tokens"],
-                "n_passages": len(ctx), "em": r["em"],
+                "n_passages": len(ctx), "acc": r["acc"], "em": r["em"],
                 # pre-registered statistic: upper-half-layer attention share on the gold passage
                 "gold_share": float(upper_half_mean(att)[g]),
                 # what the gold passage would get if attention were proportional to length
