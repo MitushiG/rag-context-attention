@@ -22,7 +22,7 @@ corrected together.
 |---|---|
 | **H1** (not supported, p = 0.64) | Length alone barely matters: 30K tokens of unrelated text left accuracy at 83% (gold passage alone: 82%). **Similar** distractors are what hurt: −30 points at 30K [−36, −24], worst with the gold passage in the middle (39% vs 65% at the end). |
 | **H2** (supported, p < 0.001) | Attention on the gold passage predicts a correct answer: condition-stratified AUROC **0.77** [0.71, 0.83]. |
-| **1B** | Real top-k RAG peaks at k = 20 (52%); the predicted best length is not well determined (bootstrap range k = 7–181) because the reader curve is flat. |
+| **1B** | Real top-k RAG peaks at k = 20 (51.5%); the predicted best length is not well determined (bootstrap range k = 7–181) because the reader curve is flat. |
 | **1C** | In the tiny GPT, attention at the lookup layer collapses from 0.90 (16 facts) to 0.02 (512); fine-tuning on longer inputs raises accuracy at 4× the training length from 36% (equal-compute control) to 96%; log-n scaling recovers part of it with no training. Learned-position and scalable-softmax variants mostly failed to train under the shared recipe (0/3 and 1/3 seeds). |
 | **H4** (supported, Holm p = 0.005) | IRCoT beats single-shot RAG on MuSiQue 2-hop: 31.5% vs 21.5%, and has both evidence passages in context twice as often (55% vs 28%). |
 | **H6** (not supported, p = 0.20) | IRCoT also helped on single-hop NQ (53.5% vs 47.0%). |
