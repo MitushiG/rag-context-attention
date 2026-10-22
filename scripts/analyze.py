@@ -189,6 +189,14 @@ def exp1_attention(att):
 
 # --------------------------------------------------------------------------- Exp 1C
 
+def lookup_layer(r) -> int:
+    """The layer that does the lookup: the one with the largest needle share at the
+    shortest test length (N = 16, inside the training range), standard attention. The
+    last layer is not it for every model (rope looks up in layer 2, none in layer 4)."""
+    shares = r["eval"]["related"][str(min(int(n) for n in r["eval"]["related"]))]["standard"]["needle_share"]
+    return int(np.argmax(shares))
+
+
 def exp1c():
     files = sorted((RESULTS / "tiny").glob("*.json"))
     if not files:
@@ -200,18 +208,24 @@ def exp1c():
         if r.get("train_curve") and r["train_curve"][-1]["acc"] < 0.95:  # pre-registered exclusion
             dropped.append(f.stem)
             continue
+        L = lookup_layer(r)
         for kind, by_n in r["eval"].items():
             for n, modes in by_n.items():
                 for mode, v in modes.items():
                     rows.append({"variant": r["variant"], "seed": r["seed"], "kind": kind, "N": int(n),
-                                 "mode": mode, "acc": v["acc"], "needle_share_last": v["needle_share"][-1]})
+                                 "mode": mode, "acc": v["acc"], "lookup_layer": L + 1,
+                                 "needle_share_lookup": v["needle_share"][L]})
     if dropped:
         out(f"Excluded (final training accuracy < 0.95): {', '.join(dropped)}\n")
+    if rows:
+        ll = pd.DataFrame(rows).groupby(["variant", "seed"]).lookup_layer.first()
+        out("Lookup layer (largest needle share at N = 16): "
+            + ", ".join(f"{v} s{sd}: {L}" for (v, sd), L in ll.items()) + "\n")
     if not rows:
         return
     d = pd.DataFrame(rows)
     for kind in ("related", "unrelated"):
-        for metric in ("acc", "needle_share_last"):
+        for metric in ("acc", "needle_share_lookup"):
             t = d[(d.kind == kind) & (d["mode"] == "standard")].groupby(["variant", "N"])[metric] \
                 .agg(lambda s: f"{s.mean():.3f} ± {s.std(ddof=1) if len(s) > 1 else 0:.3f}").unstack("N")
             out(f"{metric}, {kind} distractors, standard attention (mean ± SD over seeds):\n")
@@ -237,21 +251,22 @@ def exp1c_finetune(base: pd.DataFrame, dropped: set[str]):
         r = json.loads(f.read_text())
         if f"{r['variant']}_s{r['seed']}" in dropped:  # base model excluded, so is its fine-tune
             continue
+        L = lookup_layer(r)
         for kind, by_n in r["eval"].items():
             for n, modes in by_n.items():
                 v = modes["standard"]
                 rows.append({"variant": r["variant"], "seed": r["seed"], "kind": kind, "N": int(n),
                              "model": f"ft_{r['mode']}", "acc": v["acc"],
-                             "needle_share_last": v["needle_share"][-1]})
+                             "needle_share_lookup": v["needle_share"][L]})
     if not rows:
         return
     b = base.copy()
     b["model"] = "base_" + b["mode"]  # base_standard, base_logn
-    d = pd.concat([b.drop(columns="mode"), pd.DataFrame(rows)])
+    d = pd.concat([b.drop(columns=["mode", "lookup_layer"]), pd.DataFrame(rows)])
     order = ["base_standard", "base_logn", "ft_same", "ft_long"]
     out("### Exp 1C fine-tuning for longer inputs (500 steps; long: N = 8–256, same: N = 8–64)\n")
     for kind in ("related", "unrelated"):
-        for metric in ("acc", "needle_share_last"):
+        for metric in ("acc", "needle_share_lookup"):
             t = d[d.kind == kind].groupby(["variant", "model", "N"])[metric].mean().unstack("N")
             t = t.reindex([(v, m) for v in sorted(d.variant.unique()) for m in order if (v, m) in t.index])
             out(f"{metric}, {kind} distractors (mean over seeds):\n")

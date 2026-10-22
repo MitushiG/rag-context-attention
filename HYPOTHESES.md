@@ -129,6 +129,11 @@ stays at chance, hence multi-query training and mixed lengths.)
 Inference-time intervention on every trained model: multiply attention logits by
 max(1, log n / log n_train), which is identical inside the training length.
 
+**Needle share** is the attention from the final position onto the needle fact's tokens,
+read at each model's **lookup layer**: the layer with the largest needle share at N = 16
+(inside the training range), so the choice does not look at the long-input results. The
+lookup is not always in the last layer (rope models look up in layer 2).
+
 **Fine-tuning for longer inputs.** Each trained model is then trained for a further 500
 steps (learning rate 3e-4, one-cycle) in two ways, each starting from the same weights:
 *long*, on N = 8–256 facts, and *same*, on the original N = 8–64, which controls for
