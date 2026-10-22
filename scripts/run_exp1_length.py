@@ -34,6 +34,8 @@ RANK_DEPTH = 1500  # enough related passages to fill 30K tokens after exclusions
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=None, help="first N questions (debug)")
+    ap.add_argument("--gpu-mem", type=float, default=0.85,
+                    help="vLLM GPU memory share; lower it if another job shares the GPU")
     args = ap.parse_args()
 
     examples = load_examples("nq_ids.txt")[: args.limit]
@@ -51,7 +53,7 @@ def main():
     save([{"qid": e["qid"], "gold_rank": (r.index(e["gold_ids"][0]) + 1) if e["gold_ids"][0] in r else None,
            "top": r[:200]} for e, r in zip(examples, ranked)], "exp1", "rankings.jsonl")
 
-    gen = Generator(max_model_len=32768, gpu_memory_utilization=0.85)
+    gen = Generator(max_model_len=32768, gpu_memory_utilization=args.gpu_mem)
     cost = TokenCounter(gen.count_tokens)
 
     conds: dict[str, tuple[dict, list]] = {}
