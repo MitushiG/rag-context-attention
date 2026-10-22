@@ -17,7 +17,7 @@ from hla.runtime import RESULTS
 lines: list[str] = []
 primary_p: dict[str, float] = {}
 LENGTH_ORDER = ["2K", "8K", "16K", "30K"]
-MARGIN = 0.01  # "best length" = shortest prompt within 1 EM point of the best
+MARGIN = 0.01  # "best length" = shortest prompt within 1 accuracy point of the best
 
 
 def out(s: str = "") -> None:
@@ -97,7 +97,7 @@ def exp1a_format(grid):
 # --------------------------------------------------------------------------- Exp 1B
 
 def _reader_curve(df):
-    """EM vs log2(tokens): gold only, then related distractors averaged over positions."""
+    """Accuracy vs log2(tokens): gold only, then related distractors averaged over positions."""
     g = df[df.condition == "gold_only"]
     pts = [(np.log2(max(g.context_tokens.mean(), 1)), g.acc.mean())]
     rel = df[(df.kind == "related") & df.length.isin(LENGTH_ORDER) & df.gold_in_context]
@@ -109,7 +109,7 @@ def _reader_curve(df):
 
 
 def predicted_curve(df, rk, ks):
-    """Predicted RAG EM(k) = R(k) * reader(L(k)) + (1 - R(k)) * EM without the gold."""
+    """Predicted RAG accuracy(k) = R(k) * reader(L(k)) + (1 - R(k)) * accuracy without the gold."""
     x, y = _reader_curve(df)
     rag = df[df.condition.str.startswith("rag")]
     tok_per_passage = rag.context_tokens.sum() / rag.n_passages.sum()
@@ -141,10 +141,10 @@ def exp1b(df, rk):
         d = pd.concat([by_q[q] for q in pick])
         boots.append(best_k(predicted_curve(d, rk_by_q.loc[pick].reset_index(), ks)[0], ks))
     lo, hi = np.quantile(boots, [0.025, 0.975])
-    out(f"**Best k** (shortest prompt within {MARGIN * 100:.0f} EM point of the best predicted): "
+    out(f"**Best k** (shortest prompt within {MARGIN * 100:.0f} accuracy point of the best predicted): "
         f"**k = {k_star}** (~{L[k_star - 1]:.0f} tokens), 95% bootstrap range [{lo:.0f}, {hi:.0f}]\n")
 
-    out("| k | tokens | retriever recall | predicted EM | observed EM | EM per 1K tokens (predicted) |")
+    out("| k | tokens | retriever recall | predicted accuracy | observed accuracy | accuracy per 1K tokens (predicted) |")
     out("|---|---|---|---|---|---|")
     obs = {int(c[5:]): g.acc for c, g in df[df.condition.str.startswith("rag_k")].groupby("condition")}
     for k in sorted(set([1, 2, 3, 5, 10, 20, 50, 100, 200, k_star])):
@@ -155,7 +155,7 @@ def exp1b(df, rk):
             o_s += f" [{e.ci_low:.3f}, {e.ci_high:.3f}]"
         out(f"| {k} | {L[k - 1]:.0f} | {R[k - 1]:.3f} | {pred[k - 1]:.3f} | {o_s} | "
             f"{1000 * pred[k - 1] / L[k - 1]:.3f} |")
-    out("\nThe prediction is checked against real top-k RAG (observed EM, 95% CI) at k = 1, 5, 20, 50.\n")
+    out("\nThe prediction is checked against real top-k RAG (observed accuracy, 95% CI) at k = 1, 5, 20, 50.\n")
 
 
 # --------------------------------------------------------------------------- Exp 1 attention
