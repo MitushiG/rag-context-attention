@@ -56,7 +56,7 @@ closed-book, gold passage only, and related distractors at 2K **without** the go
 over the 24 length × type × position conditions. One-sided test of **β₁ < 0**.
 
 *Secondary:* length × distractor-type interaction (expected: related text hurts more);
-gold only vs 30K per distractor type (paired bootstrap); accuracy per 1K tokens; EM − accuracy gap by length.
+gold only vs 30K per distractor type (paired bootstrap); accuracy per 1K tokens; EM − accuracy gap by length; share of answers over 8 words by length, and a lower bound on accuracy that counts those long answers as wrong, with H1 refitted on it (a long answer that restates the prompt can contain the gold answer by chance).
 
 ## Exp 1B — The best RAG prompt length
 

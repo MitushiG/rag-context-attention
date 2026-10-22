@@ -44,7 +44,7 @@ def exp1a(df):
     grid = df[df.length.isin(LENGTH_ORDER) & df.gold_in_context].copy()
     grid["log2_tokens"] = np.log2(grid.context_tokens)
     for kind, g in grid.groupby("kind"):
-        out(f"EM, {kind} distractors (rows: length, columns: gold position):\n")
+        out(f"Accuracy, {kind} distractors (rows: length, columns: gold position):\n")
         out(g.pivot_table(index="length", columns="position", values="acc")
             .reindex(index=LENGTH_ORDER, columns=["start", "middle", "end"]).round(3).to_markdown())
         out()
@@ -66,6 +66,32 @@ def exp1a(df):
         d = stats.paired_bootstrap_diff(wide["gold_only"], long_)
         out(f"- gold only − {kind} 30K (mean over positions): {d}")
     out()
+    exp1a_format(grid)
+
+
+SHORT_WORDS = 8  # an answer longer than this was not a short answer
+
+
+def exp1a_format(grid):
+    """Secondary: format compliance by length, and whether accuracy holds up when only
+    short answers count. A long answer that restates part of the prompt can contain the
+    gold answer by chance, which would inflate accuracy where answers get long."""
+    g = grid.copy()
+    g["words"] = g.pred.fillna("").str.split().str.len()
+    g["long_answer"] = g.words > SHORT_WORDS
+    g["acc_short_only"] = g.acc.where(~g.long_answer, 0.0)  # long answers count as wrong
+    t = g.groupby(["kind", "length"]).agg(acc=("acc", "mean"), em=("em", "mean"),
+                                          acc_short_only=("acc_short_only", "mean"),
+                                          long_answers=("long_answer", "mean"),
+                                          mean_words=("words", "mean"))
+    t = t.reindex([(k, l) for k in ("related", "unrelated") for l in LENGTH_ORDER if (k, l) in t.index])
+    out(f"Format compliance (secondary): share of answers over {SHORT_WORDS} words, and accuracy "
+        "when long answers are counted as wrong (a lower bound on accuracy):\n")
+    out(t.round(3).to_markdown())
+    out()
+    r = stats.logit_clustered("acc_short_only ~ log2_tokens + C(kind) + C(position)", g, "qid")
+    out(f"- H1 refit on the lower bound: log2(tokens) coefficient {r.params['log2_tokens']:.3f} "
+        f"(SE {r.bse['log2_tokens']:.3f}); not a primary test\n")
 
 
 # --------------------------------------------------------------------------- Exp 1B
