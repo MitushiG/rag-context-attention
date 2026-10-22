@@ -13,3 +13,4 @@ data/processed/
 results/**/*.jsonl
 results/**/*.npy
 results/**/*.npz
+results/**/*.pt

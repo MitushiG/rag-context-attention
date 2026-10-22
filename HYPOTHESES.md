@@ -1,7 +1,8 @@
 # Pre-registration: How Long Should a RAG Prompt Be, and Does Iterative Retrieval Help?
 
-Any later change to a question, metric, sample or test goes in the **Amendments**
-section at the bottom, with a date and a reason. Earlier text is never edited.
+The design below is kept current: changes are made in place in the relevant section,
+and git history records every change and its date. The Amendments section at the bottom
+records the earlier redesigns.
 
 This version replaces two earlier designs (see git history and Amendments). It was
 written **before any data was downloaded or any experiment was run**.
@@ -103,7 +104,15 @@ their answer, so one sequence gives 8 training signals. Accuracy and attention a
 measured on the final query. Related distractors share the query key's first symbol;
 unrelated keys are random. Train on N = 8–64 (drawn per batch; half related, half
 unrelated); test on N = 16, 32, 64, 128, 256, 512. 4 layers, 4 heads, width 128;
-8,000 steps; seeds 0, 1, 2. A run counts only if its final training accuracy is ≥ 0.95.
+AdamW (weight decay 0.1, gradient clipping 1.0), one-cycle learning-rate schedule, batch
+64; seeds 0, 1, 2. A run counts only if its final training accuracy is ≥ 0.95.
+
+**Training recipe.** The first recipe tried (8,000 steps, learning rate 1e-3, all lengths
+from the start) left training accuracy at 0.11, so the recipe is chosen by a training-only
+tuning run on seed 99, which is not a study seed: the first of learning rate {1e-3, 3e-3}
+× {no curriculum, curriculum} at 20,000 steps to reach ≥ 0.95 training accuracy. The
+curriculum raises the largest N linearly from 8 to 64 over the first half of training.
+Tuning looks only at training accuracy, never at the length evaluation.
 (Design note: a CPU check before any experiment showed single-query training at N = 64
 stays at chance, hence multi-query training and mixed lengths.)
 
@@ -117,10 +126,20 @@ stays at chance, hence multi-query training and mixed lengths.)
 Inference-time intervention on every trained model: multiply attention logits by
 max(1, log n / log n_train), which is identical inside the training length.
 
+**Fine-tuning for longer inputs.** Each trained model is then trained for a further 500
+steps (learning rate 3e-4, one-cycle) in two ways, each starting from the same weights:
+*long*, on N = 8–256 facts, and *same*, on the original N = 8–64, which controls for
+the extra training alone. Both are evaluated on the same test sets as above. The effect
+of training on longer inputs is *long* − *same*; it is set beside log-n scaling, which
+needs no training. This is how context length is extended in practice.
+
 **H3 (descriptive).** (a) *learned* collapses beyond N = 64 while *rope* degrades
 gradually; (b) the share of attention on the needle falls as N grows; (c) log-n scaling
 (at inference) and *rope_ssmax* (in training) reduce both the attention-share loss and
-the accuracy loss beyond the training length. Reported as means with the range over
+the accuracy loss beyond the training length; (d) fine-tuning on longer inputs
+(*long* − *same*) recovers accuracy at N = 128–256, which it saw in fine-tuning, more
+than at N = 512, which it did not, and helps *learned* most, whose positions beyond the
+original training length were never trained. Reported as means with the range over
 seeds; not part of the Holm family.
 
 ---

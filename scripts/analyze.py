@@ -194,6 +194,47 @@ def exp1c():
     out(eff[eff.N > 64].groupby(["variant", "kind", "N"]).logn_gain
         .agg(lambda s: f"{s.mean():+.3f} [{s.min():+.3f}, {s.max():+.3f}]").unstack("N").to_markdown())
     out("\nH3 is descriptive (3 seeds per variant) and is not part of the Holm family.\n")
+    exp1c_finetune(d, set(dropped))
+
+
+def exp1c_finetune(base: pd.DataFrame, dropped: set[str]):
+    """Fine-tuning on longer inputs (long, N = 8-256) vs the same amount of extra training on
+    the original lengths (same, N = 8-64), next to the base model with and without log-n."""
+    files = sorted((RESULTS / "tiny" / "finetune").glob("*.json"))
+    if not files:
+        return out("### Exp 1C fine-tuning: skipped (no results/tiny/finetune/*.json)\n")
+    rows = []
+    for f in files:
+        r = json.loads(f.read_text())
+        if f"{r['variant']}_s{r['seed']}" in dropped:  # base model excluded, so is its fine-tune
+            continue
+        for kind, by_n in r["eval"].items():
+            for n, modes in by_n.items():
+                v = modes["standard"]
+                rows.append({"variant": r["variant"], "seed": r["seed"], "kind": kind, "N": int(n),
+                             "model": f"ft_{r['mode']}", "acc": v["acc"],
+                             "needle_share_last": v["needle_share"][-1]})
+    if not rows:
+        return
+    b = base.copy()
+    b["model"] = "base_" + b["mode"]  # base_standard, base_logn
+    d = pd.concat([b.drop(columns="mode"), pd.DataFrame(rows)])
+    order = ["base_standard", "base_logn", "ft_same", "ft_long"]
+    out("### Exp 1C fine-tuning for longer inputs (500 steps; long: N = 8–256, same: N = 8–64)\n")
+    for kind in ("related", "unrelated"):
+        for metric in ("acc", "needle_share_last"):
+            t = d[d.kind == kind].groupby(["variant", "model", "N"])[metric].mean().unstack("N")
+            t = t.reindex([(v, m) for v in sorted(d.variant.unique()) for m in order if (v, m) in t.index])
+            out(f"{metric}, {kind} distractors (mean over seeds):\n")
+            out(t.round(3).to_markdown())
+            out()
+    w = d[d.model.isin(["ft_long", "ft_same"])].pivot_table(
+        index=["variant", "seed", "kind", "N"], columns="model", values="acc").reset_index()
+    w["gain"] = w["ft_long"] - w["ft_same"]
+    out("Effect of training on longer inputs (ft_long − ft_same accuracy), mean [min, max] over seeds:\n")
+    out(w.groupby(["variant", "kind", "N"]).gain
+        .agg(lambda s: f"{s.mean():+.3f} [{s.min():+.3f}, {s.max():+.3f}]").unstack("N").to_markdown())
+    out("\nDescriptive (3 seeds per variant); not part of the Holm family.\n")
 
 
 # --------------------------------------------------------------------------- Exp 2

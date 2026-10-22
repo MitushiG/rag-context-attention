@@ -36,13 +36,20 @@ Inference-time intervention, applied to every trained model at evaluation:
             standard model inside the training length; sharper beyond it. Same weights,
             so any change in accuracy is *caused* by the attention temperature.
 
+Fine-tuning for longer inputs (--finetune, after the sweep): each trained model is trained
+for a further 500 steps either on N = 8-256 facts ("long") or, as a control for the extra
+training alone, on N = 8-64 ("same"), then evaluated again. long - same is the effect of
+training on longer inputs; it is compared with log-n scaling, which costs no training.
+
 We record accuracy and the attention share on the needle fact (from the final position,
 per layer). The attention-dilution hypothesis predicts that share falls as N grows, and
 that sharpening attention (logn / ssmax) slows that fall and the accuracy loss.
 
   python foundations/tiny_recall.py --pos rope --seed 0      # one run, a few minutes on a T4
   python foundations/tiny_recall.py --sweep                  # 4 variants x 3 seeds
-Results: results/tiny/<variant>_s<seed>.json, summarized by scripts/analyze.py.
+  python foundations/tiny_recall.py --finetune               # long + same, every saved model
+Results: results/tiny/<variant>_s<seed>.json (+ .pt weights) and
+results/tiny/finetune/<variant>_s<seed>_<long|same>.json, summarized by scripts/analyze.py.
 """
 from __future__ import annotations
 
@@ -62,6 +69,7 @@ VOCAB = QUERY + 1
 FACT = KEY_LEN + 1
 N_TRAIN = 64
 N_QUERIES = 8
+N_FINETUNE = 256  # longest N seen when fine-tuning for longer inputs
 TEST_N = (16, 32, 64, 128, 256, 512)
 QUERY_BLOCK = (1 + FACT) * N_QUERIES - 1          # "Q k k k v" x 8, minus the final answer
 MAX_LEN = FACT * max(TEST_N) + QUERY_BLOCK
@@ -256,7 +264,26 @@ def run(variant, seed, steps, device, out_dir=Path("results/tiny"), lr=1e-3, cur
            "train_curve": curve,
            "eval": evaluate(model, device) if do_eval else None, "minutes": round((time.time() - t0) / 60, 2)}
     out_dir.mkdir(parents=True, exist_ok=True)
+    torch.save(model.state_dict(), out_dir / f"{variant}_s{seed}.pt")  # for --finetune
     (out_dir / f"{variant}_s{seed}.json").write_text(json.dumps(res))
+    return res
+
+
+def finetune(variant, seed, mode, steps, lr, device, out_dir=Path("results/tiny")):
+    """Continue training a saved model for ``steps`` steps, on N = 8-256 facts ("long") or on
+    the original N = 8-64 ("same": the control for extra training alone), then re-evaluate."""
+    pos, ssmax = VARIANTS[variant]
+    model = TinyGPT(pos=pos, ssmax=ssmax).to(device)
+    model.load_state_dict(torch.load(out_dir / f"{variant}_s{seed}.pt", map_location=device))
+    print(f"{variant} seed {seed}: fine-tune ({mode})")
+    t0 = time.time()
+    curve = train(model, steps, device, seed=1_000 + seed, lr=lr,
+                  max_facts=N_FINETUNE if mode == "long" else N_TRAIN)
+    res = {"variant": variant, "seed": seed, "mode": mode, "steps": steps, "lr": lr,
+           "max_facts": N_FINETUNE if mode == "long" else N_TRAIN, "train_curve": curve,
+           "eval": evaluate(model, device), "minutes": round((time.time() - t0) / 60, 2)}
+    (out_dir / "finetune").mkdir(parents=True, exist_ok=True)
+    (out_dir / "finetune" / f"{variant}_s{seed}_{mode}.json").write_text(json.dumps(res))
     return res
 
 
@@ -272,10 +299,24 @@ def main():
     ap.add_argument("--out", default="results/tiny", help="use e.g. results/tiny_pilot for tuning runs")
     ap.add_argument("--no-eval", action="store_true", help="train only (for tuning)")
     ap.add_argument("--sweep", action="store_true", help="all 4 variants x seeds 0, 1, 2")
+    ap.add_argument("--finetune", action="store_true",
+                    help="fine-tune every saved model in --out on longer inputs and on the control")
+    ap.add_argument("--ft-steps", type=int, default=500)
+    ap.add_argument("--ft-lr", type=float, default=3e-4)
     args = ap.parse_args()
     out = Path(args.out)
     device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
-    if args.sweep:
+    if args.finetune:
+        for variant in VARIANTS:
+            for seed in (0, 1, 2):
+                if not (out / f"{variant}_s{seed}.pt").exists():
+                    continue
+                for mode in ("long", "same"):
+                    if (out / "finetune" / f"{variant}_s{seed}_{mode}.json").exists():
+                        print(f"{variant} seed {seed} {mode}: done, skipping")
+                        continue
+                    finetune(variant, seed, mode, args.ft_steps, args.ft_lr, device, out)
+    elif args.sweep:
         for variant in VARIANTS:
             for seed in (0, 1, 2):
                 if (out / f"{variant}_s{seed}.json").exists():
