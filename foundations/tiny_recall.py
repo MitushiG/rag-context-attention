@@ -292,9 +292,9 @@ def main():
     ap.add_argument("--pos", choices=["rope", "learned", "none"], default="rope")
     ap.add_argument("--ssmax", action="store_true")
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--steps", type=int, default=8000)
+    ap.add_argument("--steps", type=int, default=20000)
     ap.add_argument("--lr", type=float, default=1e-3)
-    ap.add_argument("--curriculum", type=float, default=0.0,
+    ap.add_argument("--curriculum", type=float, default=0.5,
                     help="fraction of training over which max N grows from 8 to 64")
     ap.add_argument("--out", default="results/tiny", help="use e.g. results/tiny_pilot for tuning runs")
     ap.add_argument("--no-eval", action="store_true", help="train only (for tuning)")

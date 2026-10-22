@@ -113,6 +113,8 @@ tuning run on seed 99, which is not a study seed: the first of learning rate {1e
 × {no curriculum, curriculum} at 20,000 steps to reach ≥ 0.95 training accuracy. The
 curriculum raises the largest N linearly from 8 to 64 over the first half of training.
 Tuning looks only at training accuracy, never at the length evaluation.
+**Chosen: learning rate 1e-3 with the curriculum, 20,000 steps** (training accuracy 1.00
+at 20,000 steps; without the curriculum, 0.06 at the same learning rate and length).
 (Design note: a CPU check before any experiment showed single-query training at N = 64
 stays at chance, hence multi-query training and mixed lengths.)
 
