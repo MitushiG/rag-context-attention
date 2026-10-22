@@ -102,18 +102,23 @@ class AttentionProbe:
     def check_against_eager(self, input_ids: list[int], rows: tuple[int, int], atol: float = 2e-2) -> float:
         """Max |probe - eager| over layers and positions. Raises if above ``atol``.
 
-        Run on a short input: eager attention is quadratic in memory.
+        Both are computed in the same eager forward pass, from the same hidden states, so
+        the check tests the probe's arithmetic. (Comparing against a separate SDPA forward
+        would add the bf16 drift between two forward passes, ~0.03 on Qwen2.5-7B, which is
+        not a probe error.) Run on a short input: eager attention is quadratic in memory.
         """
         torch = self.torch
-        got = self.answer_attention(input_ids, rows)
         prev = self.model.config._attn_implementation
         self._set_attn("eager")
+        self._rows, self._per_layer = rows, {}
         try:
             with torch.no_grad():
                 out = self.model.model(input_ids=torch.tensor([input_ids], device=self.device),
                                        output_attentions=True, use_cache=False)
         finally:
+            self._rows = None
             self._set_attn(prev)
+        got = np.stack([self._per_layer[i].numpy() for i in range(len(self.layers))])
         ref = np.stack([a[0, :, rows[0]:rows[1], :].float().mean(dim=(0, 1)).cpu().numpy()
                         for a in out.attentions])
         err = float(np.abs(got - ref).max())

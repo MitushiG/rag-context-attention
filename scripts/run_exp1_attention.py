@@ -40,6 +40,8 @@ def main():
     if args.check:
         for r in [r for r in todo if r["n_passages"] > 1][:3]:
             ex, ctx = context(r)
+            # gold + 2 distractors: eager attention over a full 2K+ prompt does not fit in memory
+            ctx = [p for p in ctx if p["is_gold"]] + [p for p in ctx if not p["is_gold"]][:2]
             ids, rows, _ = probe.encode(ex["question"], ctx, r["pred"] or " ")
             print(f"probe vs eager: max abs diff {probe.check_against_eager(ids, rows):.2e}")
 
