@@ -162,6 +162,9 @@ def exp1b(df, rk):
 
 def exp1_attention(att):
     out("## Exp 1: attention on the gold passage\n")
+    # gold only has a single passage, so its share is 1 by construction: it carries no
+    # information about correctness and would pull the stratified AUROC towards 0.5
+    att = att[att.n_passages > 1]
     est = stats.cluster_bootstrap(att, "qid", lambda d: stats.stratified_auroc(d.gold_share, d.acc, d.condition), null=0.5)
     p = stats.one_sided_from_two(est, 0.5, ">")
     primary_p["H2"] = p

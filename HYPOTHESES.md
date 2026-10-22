@@ -89,6 +89,7 @@ eager attention.
 (computed within each condition, averaged with weights = number of correct–incorrect
 pairs) is > 0.5. One-sided, question-level bootstrap (2,000 resamples). Stratifying
 stops length, which lowers both share and accuracy, from producing the AUROC by itself.
+Gold only is left out of the AUROC: with one passage its share is 1 by construction.
 
 *Secondary:* log(gold share) vs log2(length) by distractor type (slope −1 = pure 1/n
 dilution); robustness with the length-adjusted share log(share / length share).
